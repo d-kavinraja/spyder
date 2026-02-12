@@ -5,16 +5,16 @@ dependencies:
 - pyqt
 - qtpy >=2.0.1
 - traitlets
-- ipython_genutils
 - jupyter_core
 - jupyter_client
 - pygments
 - ipykernel
-- pyzmq >=17.1
+- ipython_pygments_lexers
 
 # For testing
 - coveralls
 - flaky
 - pytest
+- pytest-asyncio
 - pytest-cov
 - pytest-qt

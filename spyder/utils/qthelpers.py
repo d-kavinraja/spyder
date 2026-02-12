@@ -21,25 +21,47 @@ from urllib.parse import unquote
 
 # Third party imports
 from qtpy.compat import from_qvariant, to_qvariant
-from qtpy.QtCore import (QEvent, QLibraryInfo, QLocale, QObject, Qt, QTimer,
-                         QTranslator, QUrl, Signal, Slot)
+from qtpy.QtCore import (
+    QEvent,
+    QLibraryInfo,
+    QLocale,
+    QObject,
+    QPoint,
+    Qt,
+    QTimer,
+    QTranslator,
+    QUrl,
+    Signal,
+    Slot,
+)
 from qtpy.QtGui import (
     QDesktopServices, QFontMetrics, QKeyEvent, QKeySequence, QPixmap)
-from qtpy.QtWidgets import (QAction, QApplication, QDialog, QHBoxLayout,
-                            QLabel, QLineEdit, QMenu, QPlainTextEdit,
-                            QProxyStyle, QPushButton, QStyle,
-                            QToolButton, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (
+    QAction,
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QPlainTextEdit,
+    QPushButton,
+    QStyle,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
 from spyder.api.config.mixins import SpyderConfigurationAccessor
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
 from spyder.config.base import is_conda_based_app
 from spyder.config.manager import CONF
-from spyder.py3compat import is_text_string, to_text_string
 from spyder.utils.icon_manager import ima
 from spyder.utils import programs
 from spyder.utils.image_path_manager import get_image_path
-from spyder.utils.palette import QStylePalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.registries import ACTION_REGISTRY, TOOLBUTTON_REGISTRY
 from spyder.widgets.waitingspinner import QWaitingSpinner
 
@@ -168,7 +190,12 @@ def keyevent_to_keysequence_str(event):
     """Get key sequence corresponding to a key event as a string."""
     try:
         # See https://stackoverflow.com/a/20656496/438386 for context
-        return QKeySequence(event.modifiers() | event.key()).toString()
+        if hasattr(event, "keyCombination"):
+            key_combination = event.keyCombination()  # Qt 6
+        else:
+            key_combination = event.modifiers() | event.key()  # Qt 5
+
+        return QKeySequence(key_combination).toString()
     except TypeError:
         # This error appears in old PyQt versions (e.g. 5.12) which are
         # running under Python 3.10+. In that case, we need to build the
@@ -219,11 +246,11 @@ def mimedata2url(source, extlist=None):
     if source.hasUrls():
         for url in source.urls():
             path = _process_mime_path(
-                unquote(to_text_string(url.toString())), extlist)
+                unquote(str(url.toString())), extlist)
             if path is not None:
                 pathlist.append(path)
     elif source.hasText():
-        for rawpath in to_text_string(source.text()).splitlines():
+        for rawpath in str(source.text()).splitlines():
             path = _process_mime_path(rawpath, extlist)
             if path is not None:
                 pathlist.append(path)
@@ -265,7 +292,7 @@ def create_toolbutton(parent, text=None, shortcut=None, icon=None, tip=None,
     if text is not None:
         button.setText(text)
     if icon is not None:
-        if is_text_string(icon):
+        if isinstance(icon, str):
             icon = ima.get_icon(icon)
         button.setIcon(icon)
     if text is not None or tip is not None:
@@ -288,7 +315,7 @@ def create_toolbutton(parent, text=None, shortcut=None, icon=None, tip=None,
     return button
 
 
-def create_waitspinner(size=32, n=11, parent=None):
+def create_waitspinner(size=32, n=11, parent=None, name=None):
     """
     Create a wait spinner with the specified size built with n circling dots.
     """
@@ -307,7 +334,9 @@ def create_waitspinner(size=32, n=11, parent=None):
     spinner.setLineLength(dot_size)
     spinner.setLineWidth(dot_size)
     spinner.setInnerRadius(inner_radius)
-    spinner.setColor(QStylePalette.COLOR_TEXT_1)
+    spinner.setColor(SpyderPalette.COLOR_TEXT_1)
+
+    spinner.name = name
 
     return spinner
 
@@ -347,7 +376,7 @@ def create_action(parent, text, shortcut=None, icon=None, tip=None,
     if toggled is not None:
         setup_toggled_action(action, toggled, section, option)
     if icon is not None:
-        if is_text_string(icon):
+        if isinstance(icon, str):
             icon = ima.get_icon(icon)
         action.setIcon(icon)
     if tip is not None:
@@ -358,29 +387,21 @@ def create_action(parent, text, shortcut=None, icon=None, tip=None,
     if menurole is not None:
         action.setMenuRole(menurole)
 
-    # Workround for Mac because setting context=Qt.WidgetShortcut
-    # there doesn't have any effect
+    if shortcut is not None:
+        action.setShortcut(shortcut)
+    action.setShortcutContext(context)
+
+    # This is necessary to show shortcuts in any regular menu (i.e. not app
+    # ones).
+    # Fixes spyder-ide/spyder#15659.
     if sys.platform == 'darwin':
-        action._shown_shortcut = None
-        if context == Qt.WidgetShortcut:
-            if shortcut is not None:
-                action._shown_shortcut = shortcut
-            else:
-                # This is going to be filled by
-                # main.register_shortcut
-                action._shown_shortcut = 'missing'
-        else:
-            if shortcut is not None:
-                action.setShortcut(shortcut)
-            action.setShortcutContext(context)
-    else:
-        if shortcut is not None:
-            action.setShortcut(shortcut)
-        action.setShortcutContext(context)
+        action.setShortcutVisibleInContextMenu(True)
 
     if register_action:
         ACTION_REGISTRY.register_reference(
-            action, id_, plugin, context_name, overwrite)
+            action, id_, plugin, context_name, overwrite
+        )
+
     return action
 
 
@@ -476,7 +497,7 @@ def add_actions(target, actions, insert_before=None):
 
 def get_item_user_text(item):
     """Get QTreeWidgetItem user role string"""
-    return from_qvariant(item.data(0, Qt.UserRole), to_text_string)
+    return from_qvariant(item.data(0, Qt.UserRole), str)
 
 
 def set_item_user_text(item, text):
@@ -516,7 +537,7 @@ def create_module_bookmark_actions(parent, bookmarks):
 
 def create_program_action(parent, text, name, icon=None, nt_name=None):
     """Create action to run a program"""
-    if is_text_string(icon):
+    if isinstance(icon, str):
         icon = ima.get_icon(icon)
     if os.name == 'nt' and nt_name is not None:
         name = nt_name
@@ -526,9 +547,13 @@ def create_program_action(parent, text, name, icon=None, nt_name=None):
                              triggered=lambda: programs.run_program(name))
 
 
-def create_python_script_action(parent, text, icon, package, module, args=[]):
+def create_python_script_action(
+    parent, text, icon, package, module, args=None
+):
     """Create action to run a GUI based Python script"""
-    if is_text_string(icon):
+    args = [] if args is None else args
+
+    if isinstance(icon, str):
         icon = ima.get_icon(icon)
     if programs.python_script_exists(package, module):
         return create_action(parent, text, icon=icon,
@@ -550,8 +575,7 @@ class DialogManager(QObject):
         """Generic method to show a non-modal dialog and keep reference
         to the Qt C++ object"""
         for dlg in list(self.dialogs.values()):
-            if to_text_string(dlg.windowTitle()) \
-               == to_text_string(dialog.windowTitle()):
+            if str(dlg.windowTitle()) == str(dialog.windowTitle()):
                 dlg.show()
                 dlg.raise_()
                 break
@@ -586,7 +610,7 @@ class SpyderAction(QAction):
 
     def __init__(self, *args, action_id=None, **kwargs):
         """Spyder QAction class wrapper to handle cross platform patches."""
-        super(SpyderAction, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.action_id = action_id
         if sys.platform == "darwin":
             self.setIconVisibleInMenu(False)
@@ -700,33 +724,23 @@ def create_plugin_layout(tools_layout, main_widget=None):
     return layout
 
 
-def set_menu_icons(menu, state):
+def set_menu_icons(menu, state, in_app_menu=False):
     """Show/hide icons for menu actions."""
     menu_actions = menu.actions()
     for action in menu_actions:
         try:
             if action.menu() is not None:
-                # This is submenu, so we need to call this again
-                set_menu_icons(action.menu(), state)
+                # This is necessary to decide if we need to show icons or not
+                action.menu()._in_app_menu = in_app_menu
+
+                # This is a submenu, so we need to call this again
+                set_menu_icons(action.menu(), state, in_app_menu)
             elif action.isSeparator():
                 continue
             else:
                 action.setIconVisibleInMenu(state)
         except RuntimeError:
             continue
-
-
-class SpyderProxyStyle(QProxyStyle):
-    """Style proxy to adjust qdarkstyle issues."""
-
-    def styleHint(self, hint, option=0, widget=0, returnData=0):
-        """Override Qt method."""
-        if hint == QStyle.SH_ComboBox_Popup:
-            # Disable combo-box popup top & bottom areas
-            # See: https://stackoverflow.com/a/21019371
-            return 0
-
-        return QProxyStyle.styleHint(self, hint, option, widget, returnData)
 
 
 class QInputDialogMultiline(QDialog):
@@ -737,7 +751,7 @@ class QInputDialogMultiline(QDialog):
     """
 
     def __init__(self, parent, title, label, text='', **kwargs):
-        super(QInputDialogMultiline, self).__init__(parent, **kwargs)
+        super().__init__(parent, **kwargs)
         if title is not None:
             self.setWindowTitle(title)
 
@@ -773,6 +787,11 @@ class SpyderApplication(QApplication, SpyderConfigurationAccessor,
         self._pending_file_open = []
         self._original_handlers = {}
 
+        # This is filled at startup in spyder.app.utils.create_window
+        self._main_window: QMainWindow = None
+
+    # ---- Qt methods
+    # -------------------------------------------------------------------------
     def event(self, event):
 
         if sys.platform == 'darwin' and event.type() == QEvent.FileOpen:
@@ -788,6 +807,8 @@ class SpyderApplication(QApplication, SpyderConfigurationAccessor,
 
         return QApplication.event(self, event)
 
+    # ---- Public API
+    # -------------------------------------------------------------------------
     def set_font(self):
         """Set font for the entire application."""
         # This selects the system font by default
@@ -803,12 +824,27 @@ class SpyderApplication(QApplication, SpyderConfigurationAccessor,
 
         app_font = self.font()
         app_font.setFamily(family)
-        app_font.setPointSize(size)
+        if size > 0:
+            app_font.setPointSize(size)
 
-        self.set_monospace_interface_font(app_font)
+        self._set_monospace_interface_font(app_font)
         self.setFont(app_font)
 
-    def set_monospace_interface_font(self, app_font):
+    def get_mainwindow_position(self) -> QPoint:
+        """Get main window position."""
+        return self._main_window.pos()
+
+    def get_mainwindow_width(self) -> int:
+        """Get main window width."""
+        return self._main_window.width()
+
+    def get_mainwindow_height(self) -> int:
+        """Get main window height."""
+        return self._main_window.height()
+
+    # ---- Private API
+    # -------------------------------------------------------------------------
+    def _set_monospace_interface_font(self, app_font):
         """
         Set monospace interface font in our config system according to the app
         one.
@@ -819,18 +855,25 @@ class SpyderApplication(QApplication, SpyderConfigurationAccessor,
         plain_font.setPointSize(size)
 
         # Select a size that matches the app font one, so that the UI looks
-        # consistent. We only check three point sizes above and below the app
-        # font to avoid getting stuck in an infinite loop.
+        # consistent.
+        attempts = 0
         monospace_size = size
         while (
+            # Keep going until the xHeight's of both fonts match
             QFontMetrics(plain_font).xHeight() != x_height
+            # We only check three point sizes above and below the app font to
+            # avoid getting stuck in an infinite loop.
             and ((size - 4) < monospace_size < (size + 4))
+            # Do this up to six times to not get stuck in an infinite loop.
+            # Fixes spyder-ide/spyder#22661
+            and attempts < 6
         ):
             if QFontMetrics(plain_font).xHeight() > x_height:
                 monospace_size -= 1
             else:
                 monospace_size += 1
             plain_font.setPointSize(monospace_size)
+            attempts += 1
 
         # There are some fonts (e.g. MS Serif) for which it seems that Qt
         # can't detect their xHeight's as expected. So, we check below
@@ -884,6 +927,20 @@ def register_app_launchservices(
                 uniform_type_identifier, role, bundle_identifier)
 
     app.applicationStateChanged.connect(handle_applicationStateChanged)
+
+
+def safe_disconnect(signal):
+    """Disconnect a Qt signal, ignoring TypeError."""
+    try:
+        signal.disconnect()
+    except TypeError:
+        # Raised when no slots are connected to the signal
+        pass
+
+
+def qbytearray_to_str(qba):
+    """Convert QByteArray object to str in a way compatible with Python 3"""
+    return str(bytes(qba.toHex().data()).decode())
 
 
 if __name__ == "__main__":

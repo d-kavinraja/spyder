@@ -24,25 +24,29 @@ import pylint
 from qtpy.compat import getopenfilename
 from qtpy.QtCore import (QByteArray, QProcess, QProcessEnvironment, Signal,
                          Slot)
-from qtpy.QtWidgets import (QInputDialog, QLabel, QMessageBox, QTreeWidgetItem,
-                            QStackedWidget, QVBoxLayout)
+from qtpy.QtWidgets import (
+    QComboBox,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QTreeWidgetItem,
+)
+from spyder_kernels.utils.pythonenv import is_conda_env
 
 # Local imports
 from spyder.api.config.decorators import on_conf_change
 from spyder.api.translations import _
 from spyder.api.widgets.main_widget import PluginMainWidget
-from spyder.config.base import get_conf_path, is_conda_based_app
-from spyder.config.utils import is_anaconda
+from spyder.config.base import get_conf_path
 from spyder.plugins.pylint.utils import get_pylintrc_path
 from spyder.plugins.variableexplorer.widgets.texteditor import TextEditor
 from spyder.utils.icon_manager import ima
 from spyder.utils.misc import getcwd_or_home, get_home_dir
 from spyder.utils.misc import get_python_executable
-from spyder.utils.palette import QStylePalette, SpyderPalette
+from spyder.utils.palette import SpyderPalette
 from spyder.widgets.comboboxes import (PythonModulesComboBox,
                                        is_module_or_package)
 from spyder.widgets.onecolumntree import OneColumnTree, OneColumnTreeActions
-from spyder.widgets.helperwidgets import PaneEmptyWidget
 
 
 # --- Constants
@@ -57,8 +61,8 @@ SUCCESS_COLOR = SpyderPalette.COLOR_SUCCESS_1
 
 # TODO: There should be some palette from the appearance plugin so this
 # is easier to use
-MAIN_TEXT_COLOR = QStylePalette.COLOR_TEXT_1
-MAIN_PREVRATE_COLOR = QStylePalette.COLOR_TEXT_1
+MAIN_TEXT_COLOR = SpyderPalette.COLOR_TEXT_1
+MAIN_PREVRATE_COLOR = SpyderPalette.COLOR_TEXT_1
 
 
 class PylintWidgetActions:
@@ -160,14 +164,14 @@ class ResultsTree(OneColumnTree):
         self.data = None
         self.set_title("")
 
-    def activated(self, item):
+    def on_item_activated(self, item):
         """Double-click event"""
         data = self.data.get(id(item))
         if data is not None:
             fname, lineno = data
             self.sig_edit_goto_requested.emit(fname, lineno, "")
 
-    def clicked(self, item):
+    def on_item_clicked(self, item):
         """Click event."""
         if isinstance(item, CategoryItem):
             if item.isExpanded():
@@ -175,7 +179,7 @@ class ResultsTree(OneColumnTree):
             else:
                 self.expandItem(item)
         else:
-            self.activated(item)
+            self.on_item_activated(item)
 
     def clear_results(self):
         self.clear()
@@ -229,7 +233,7 @@ class ResultsTree(OneColumnTree):
                     modname = osp.join(modname, "__init__")
 
                 for ext in (".py", ".pyw"):
-                    if osp.isfile(modname+ext):
+                    if osp.isfile(modname + ext):
                         modname = modname + ext
                         break
 
@@ -264,7 +268,15 @@ class PylintWidget(PluginMainWidget):
     """
     Pylint widget.
     """
+    # PluginMainWidget API
     ENABLE_SPINNER = True
+    SHOW_MESSAGE_WHEN_EMPTY = True
+    IMAGE_WHEN_EMPTY = "code-analysis"
+    MESSAGE_WHEN_EMPTY = _("Code not analyzed yet")
+    DESCRIPTION_WHEN_EMPTY = _(
+        "Run an analysis using Pylint to get feedback on style issues, bad "
+        "practices, potential bugs, and suggested improvements in your code."
+    )
 
     DATAPATH = get_conf_path("pylint.results")
     VERSION = "1.1.0"
@@ -316,14 +328,7 @@ class PylintWidget(PluginMainWidget):
         self.datelabel.ID = PylintWidgetToolbarItems.DateLabel
 
         self.treewidget = ResultsTree(self)
-        self.pane_empty = PaneEmptyWidget(
-            self,
-            "code-analysis",
-            _("Code not analyzed yet"),
-            _("Run an analysis using Pylint to get feedback on "
-              "style issues, bad practices, potential bugs, "
-              "and suggested improvements in your code.")
-        )
+        self.set_content_widget(self.treewidget)
 
         if osp.isfile(self.DATAPATH):
             try:
@@ -336,18 +341,9 @@ class PylintWidget(PluginMainWidget):
                 pass
 
         # Widget setup
-        self.filecombo.setInsertPolicy(self.filecombo.InsertAtTop)
+        self.filecombo.setInsertPolicy(QComboBox.InsertPolicy.InsertAtTop)
         for fname in self.curr_filenames[::-1]:
             self.set_filename(fname)
-
-        # Layout
-        self.stacked_widget = QStackedWidget(self)
-        self.stacked_widget.addWidget(self.pane_empty)
-        self.stacked_widget.addWidget(self.treewidget)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.stacked_widget)
-        self.setLayout(layout)
 
         # Signals
         self.filecombo.valid.connect(self._check_new_file)
@@ -373,21 +369,12 @@ class PylintWidget(PluginMainWidget):
             lambda ec, es=QProcess.ExitStatus: self._finished(ec, es))
 
         command_args = self.get_command(self.get_filename())
-        processEnvironment = QProcessEnvironment()
-        processEnvironment.insert("PYTHONIOENCODING", "utf8")
-
-        if os.name == 'nt':
-            # Needed due to changes in Pylint 2.14.0
-            # See spyder-ide/spyder#18175
-            home_dir = get_home_dir()
-            user_profile = os.environ.get("USERPROFILE", home_dir)
-            processEnvironment.insert("USERPROFILE", user_profile)
-            # Needed for Windows installations using standalone Python and pip.
-            # See spyder-ide/spyder#19385
-            if not is_conda_based_app() and not is_anaconda():
-                processEnvironment.insert("APPDATA", os.environ.get("APPDATA"))
-
-        process.setProcessEnvironment(processEnvironment)
+        pythonpath_manager_values = self.get_conf(
+            'spyder_pythonpath', default=[], section='pythonpath_manager'
+        )
+        process.setProcessEnvironment(
+            self.get_environment(pythonpath_manager_values)
+        )
         process.start(sys.executable, command_args)
         running = process.waitForStarted()
         if not running:
@@ -634,7 +621,7 @@ class PylintWidget(PluginMainWidget):
             The valur to set  the maximum history depth. If no value is
             provided, an input dialog will be launched. Default is None.
         """
-        if value is None:
+        if value is None or isinstance(value, bool):
             dialog = QInputDialog(self)
 
             # Set dialog properties
@@ -793,17 +780,17 @@ class PylintWidget(PluginMainWidget):
             text = _("Source code has not been rated yet.")
             self.treewidget.clear_results()
             date_text = ""
-            self.stacked_widget.setCurrentWidget(self.pane_empty)
+            self.show_empty_message()
         else:
             datetime, rate, previous_rate, results = data
             if rate is None:
-                self.stacked_widget.setCurrentWidget(self.treewidget)
+                self.show_content_widget()
                 text = _("Analysis did not succeed "
                          "(see output for more details).")
                 self.treewidget.clear_results()
                 date_text = ""
             else:
-                self.stacked_widget.setCurrentWidget(self.treewidget)
+                self.show_content_widget()
                 text_style = "<span style=\"color: %s\"><b>%s </b></span>"
                 rate_style = "<span style=\"color: %s\"><b>%s</b></span>"
                 prevrate_style = "<span style=\"color: %s\">%s</span>"
@@ -869,7 +856,7 @@ class PylintWidget(PluginMainWidget):
 
         If `filename` is provided, the dialog is not used.
         """
-        if filename is None:
+        if filename is None or isinstance(filename, bool):
             self.sig_redirect_stdio_requested.emit(False)
             filename, _selfilter = getopenfilename(
                 self,
@@ -946,6 +933,34 @@ class PylintWidget(PluginMainWidget):
         command_args.append(filename)
         return command_args
 
+    @staticmethod
+    def get_environment(
+        pythonpath_manager_values: list
+    ) -> QProcessEnvironment:
+        """Get evironment variables for pylint command."""
+        process_environment = QProcessEnvironment()
+        process_environment.insert("PYTHONIOENCODING", "utf8")
+
+        if pythonpath_manager_values:
+            pypath = os.pathsep.join(pythonpath_manager_values)
+            # See PR spyder-ide/spyder#21891
+            process_environment.insert("PYTHONPATH", pypath)
+
+        if os.name == 'nt':
+            # Needed due to changes in Pylint 2.14.0
+            # See spyder-ide/spyder#18175
+            home_dir = get_home_dir()
+            user_profile = os.environ.get("USERPROFILE", home_dir)
+            process_environment.insert("USERPROFILE", user_profile)
+            # Needed for Windows installations using standalone Python and pip.
+            # See spyder-ide/spyder#19385
+            if not is_conda_env(sys.prefix):
+                process_environment.insert(
+                    "APPDATA", os.environ.get("APPDATA")
+                )
+
+        return process_environment
+
     def parse_output(self, output):
         """
         Parse output and return current revious rate and results.
@@ -998,7 +1013,7 @@ class PylintWidget(PluginMainWidget):
         if i_rate > 0:
             i_rate_end = output.find("/10", i_rate)
             if i_rate_end > 0:
-                rate = output[i_rate+len(txt_rate):i_rate_end]
+                rate = output[i_rate + len(txt_rate):i_rate_end]
 
         # Previous run
         previous = ""
@@ -1007,7 +1022,7 @@ class PylintWidget(PluginMainWidget):
             i_prun = output.find(txt_prun, i_rate_end)
             if i_prun > 0:
                 i_prun_end = output.find("/10", i_prun)
-                previous = output[i_prun+len(txt_prun):i_prun_end]
+                previous = output[i_prun + len(txt_prun):i_prun_end]
 
         return rate, previous, results
 

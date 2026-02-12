@@ -8,12 +8,11 @@
 
 # Standard library imports
 import re
-import sre_constants
 import sys
 
 # Third party imports
 import qstylizer.style
-from qtpy import PYQT5
+from qtpy import PYSIDE2
 from qtpy.QtCore import QEvent, Qt, QUrl, Signal, Slot
 from qtpy.QtGui import QFontInfo
 from qtpy.QtWebEngineWidgets import (WEBENGINE, QWebEnginePage,
@@ -24,10 +23,8 @@ from qtpy.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QWidget
 from spyder.api.translations import _
 from spyder.api.widgets.mixins import SpyderWidgetMixin
 from spyder.config.base import DEV
-from spyder.config.gui import OLD_PYQT
-from spyder.py3compat import is_text_string, to_text_string
 from spyder.utils.icon_manager import ima
-from spyder.utils.palette import QStylePalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.qthelpers import (action2button, create_plugin_layout,
                                     create_toolbutton)
 from spyder.widgets.comboboxes import UrlComboBox
@@ -75,12 +72,14 @@ class WebPage(QWebEnginePage):
         """
         Overloaded method to handle links ourselves
         """
-        if navigation_type == QWebEnginePage.NavigationTypeLinkClicked:
+        link_clicked = QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+        if navigation_type == link_clicked:
             self.linkClicked.emit(url)
             return False
 
-        return super(WebPage, self).acceptNavigationRequest(
-            url, navigation_type, isMainFrame)
+        return super().acceptNavigationRequest(
+            url, navigation_type, isMainFrame
+        )
 
 
 class WebView(QWebEngineView, SpyderWidgetMixin):
@@ -99,7 +98,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
 
     def __init__(self, parent, handle_links=True, class_parent=None):
         class_parent = parent if class_parent is None else class_parent
-        if PYQT5:
+        if not PYSIDE2:
             super().__init__(parent, class_parent=class_parent)
         else:
             QWebEngineView.__init__(self, parent)
@@ -117,9 +116,11 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             self.setPage(web_page)
             self.source_text = ''
 
-    def setup(self, options={}):
+    def setup(self, options=None):
+        options = {} if options is None else options
+
         # Actions
-        original_back_action = self.pageAction(QWebEnginePage.Back)
+        original_back_action = self.pageAction(QWebEnginePage.WebAction.Back)
         back_action = self.create_action(
             name=WebViewActions.Back,
             text=_("Back"),
@@ -128,7 +129,9 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             context=Qt.WidgetWithChildrenShortcut,
         )
 
-        original_forward_action = self.pageAction(QWebEnginePage.Forward)
+        original_forward_action = self.pageAction(
+            QWebEnginePage.WebAction.Forward
+        )
         forward_action = self.create_action(
             name=WebViewActions.Forward,
             text=_("Forward"),
@@ -137,7 +140,9 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             context=Qt.WidgetWithChildrenShortcut,
         )
 
-        original_select_action = self.pageAction(QWebEnginePage.SelectAll)
+        original_select_action = self.pageAction(
+            QWebEnginePage.WebAction.SelectAll
+        )
         select_all_action = self.create_action(
             name=WebViewActions.SelectAll,
             text=_("Select all"),
@@ -145,7 +150,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             context=Qt.WidgetWithChildrenShortcut,
         )
 
-        original_copy_action = self.pageAction(QWebEnginePage.Copy)
+        original_copy_action = self.pageAction(QWebEnginePage.WebAction.Copy)
         copy_action = self.create_action(
             name=WebViewActions.Copy,
             text=_("Copy"),
@@ -170,7 +175,8 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
         )
 
         original_inspect_action = self.pageAction(
-            QWebEnginePage.InspectElement)
+            QWebEnginePage.WebAction.InspectElement
+        )
         inspect_action = self.create_action(
             name=WebViewActions.Inspect,
             text=_("Inspect"),
@@ -178,7 +184,9 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             context=Qt.WidgetWithChildrenShortcut,
         )
 
-        original_refresh_action = self.pageAction(QWebEnginePage.Reload)
+        original_refresh_action = self.pageAction(
+            QWebEnginePage.WebAction.Reload
+        )
         self.create_action(
             name=WebViewActions.Refresh,
             text=_("Refresh"),
@@ -187,7 +195,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
             context=Qt.WidgetWithChildrenShortcut,
         )
 
-        original_stop_action = self.pageAction(QWebEnginePage.Stop)
+        original_stop_action = self.pageAction(QWebEnginePage.WebAction.Stop)
         self.create_action(
             name=WebViewActions.Stop,
             text=_("Stop"),
@@ -239,14 +247,14 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
         if not WEBENGINE:
             findflag = QWebEnginePage.FindWrapsAroundDocument
         else:
-            findflag = 0
+            findflag = QWebEnginePage.FindFlag(0)
 
         if not forward:
             findflag = findflag | QWebEnginePage.FindBackward
         if case:
             findflag = findflag | QWebEnginePage.FindCaseSensitively
 
-        return self.findText(text, QWebEnginePage.FindFlags(findflag))
+        return self.findText(text, findflag)
 
     def get_selected_text(self):
         """Return text selected by current text cursor"""
@@ -259,7 +267,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
     def get_number_matches(self, pattern, source_text='', case=False,
                            regexp=False, word=False):
         """Get the number of matches for the searched text."""
-        pattern = to_text_string(pattern)
+        pattern = str(pattern)
         if not pattern:
             return 0
         if not regexp:
@@ -267,10 +275,9 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
         if not source_text:
             if WEBENGINE:
                 self.page().toPlainText(self.set_source_text)
-                source_text = to_text_string(self.source_text)
+                source_text = str(self.source_text)
             else:
-                source_text = to_text_string(
-                        self.page().mainFrame().toPlainText())
+                source_text = str(self.page().mainFrame().toPlainText())
 
         if word:  # match whole words only
             pattern = r'\b{pattern}\b'.format(pattern=pattern)
@@ -280,7 +287,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
                 regobj = re.compile(pattern, re.MULTILINE)
             else:
                 regobj = re.compile(pattern, re.MULTILINE | re.IGNORECASE)
-        except sre_constants.error:
+        except re.error:
             return
 
         number_matches = 0
@@ -289,18 +296,27 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
 
         return number_matches
 
-    def set_font(self, font, fixed_font=None):
+    def set_font(self, font, fixed_font=None, size_delta=0):
         font = QFontInfo(font)
         settings = self.page().settings()
-        for fontfamily in (settings.StandardFont, settings.SerifFont,
-                           settings.SansSerifFont, settings.CursiveFont,
-                           settings.FantasyFont):
+
+        for fontfamily in (QWebEngineSettings.FontFamily.StandardFont,
+                           QWebEngineSettings.FontFamily.SerifFont,
+                           QWebEngineSettings.FontFamily.SansSerifFont,
+                           QWebEngineSettings.FontFamily.CursiveFont,
+                           QWebEngineSettings.FontFamily.FantasyFont):
             settings.setFontFamily(fontfamily, font.family())
+
         if fixed_font is not None:
-            settings.setFontFamily(settings.FixedFont, fixed_font.family())
-        size = font.pixelSize()
-        settings.setFontSize(settings.DefaultFontSize, size)
-        settings.setFontSize(settings.DefaultFixedFontSize, size)
+            settings.setFontFamily(
+                QWebEngineSettings.FontFamily.FixedFont, fixed_font.family()
+            )
+
+        size = font.pixelSize() + size_delta
+        settings.setFontSize(QWebEngineSettings.FontSize.DefaultFontSize, size)
+        settings.setFontSize(
+            QWebEngineSettings.FontSize.DefaultFixedFontSize, size
+        )
 
     def apply_zoom_factor(self):
         """Apply zoom factor."""
@@ -337,7 +353,7 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
         import webbrowser
         # See: spyder-ide/spyder#9849
         try:
-            webbrowser.open(to_text_string(self.url().toString()))
+            webbrowser.open(str(self.url().toString()))
         except ValueError:
             pass
 
@@ -355,13 +371,9 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
         https://bugreports.qt.io/browse/QTBUG-52999
         """
         if WEBENGINE:
-            if OLD_PYQT:
-                self.setEnabled(False)
-            super(WebView, self).setHtml(html, baseUrl)
-            if OLD_PYQT:
-                self.setEnabled(True)
+            super().setHtml(html, baseUrl)
         else:
-            super(WebView, self).setHtml(html, baseUrl)
+            super().setHtml(html, baseUrl)
 
         # This is required to catch an error with PyQt 5.9, for which
         # it seems this functionality is not working.
@@ -402,6 +414,14 @@ class WebView(QWebEngineView, SpyderWidgetMixin):
                 self.sig_focus_in_event.emit()
             elif event.type() == QEvent.FocusOut:
                 self.sig_focus_out_event.emit()
+
+        if (
+            event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+            and self.get_conf("disable_zoom_mouse", section="main")
+        ):
+            return True
+
         return super().eventFilter(widget, event)
 
 
@@ -432,13 +452,13 @@ class WebBrowser(QWidget):
                 self.webview.pageAction(prop), parent=self.webview, icon=icon)
 
         refresh_button = pageact2btn(
-            QWebEnginePage.Reload, icon=ima.icon('refresh'))
+            QWebEnginePage.WebAction.Reload, icon=ima.icon('refresh'))
         stop_button = pageact2btn(
-            QWebEnginePage.Stop, icon=ima.icon('stop'))
+            QWebEnginePage.WebAction.Stop, icon=ima.icon('stop'))
         previous_button = pageact2btn(
-            QWebEnginePage.Back, icon=ima.icon('previous'))
+            QWebEnginePage.WebAction.Back, icon=ima.icon('previous'))
         next_button = pageact2btn(
-            QWebEnginePage.Forward, icon=ima.icon('next'))
+            QWebEnginePage.WebAction.Forward, icon=ima.icon('next'))
 
         stop_button.setEnabled(False)
         self.webview.loadStarted.connect(lambda: stop_button.setEnabled(True))
@@ -496,7 +516,7 @@ class WebBrowser(QWidget):
 
     def go_to(self, url_or_text):
         """Go to page *address*"""
-        if is_text_string(url_or_text):
+        if isinstance(url_or_text, str):
             url = QUrl(url_or_text)
         else:
             url = url_or_text
@@ -514,7 +534,7 @@ class WebBrowser(QWidget):
 
     def url_combo_activated(self, valid):
         """Load URL from combo box first item"""
-        text = to_text_string(self.url_combo.currentText())
+        text = str(self.url_combo.currentText())
         self.go_to(self.text_to_url(text))
 
     def load_finished(self, ok):
@@ -589,16 +609,16 @@ class FrameWebView(QFrame):
     def _apply_stylesheet(self, focus=False):
         """Apply stylesheet according to the current focus."""
         if focus:
-            border_color = QStylePalette.COLOR_ACCENT_3
+            border_color = SpyderPalette.COLOR_ACCENT_3
         else:
-            border_color = QStylePalette.COLOR_BACKGROUND_4
+            border_color = SpyderPalette.COLOR_BACKGROUND_4
 
         css = qstylizer.style.StyleSheet()
         css.QFrame.setValues(
             border=f'1px solid {border_color}',
             margin='0px',
             padding='0px',
-            borderRadius=f'{QStylePalette.SIZE_BORDER_RADIUS}'
+            borderRadius=SpyderPalette.SIZE_BORDER_RADIUS
         )
 
         self.setStyleSheet(css.toString())

@@ -21,3 +21,5 @@ __pycache__
 .#*
 .coverage
 .pytest_cache
+.vscode
+.spyproject

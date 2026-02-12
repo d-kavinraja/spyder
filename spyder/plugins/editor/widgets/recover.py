@@ -15,11 +15,22 @@ import time
 # Third party imports
 from qtpy.compat import getsavefilename
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
-                            QHBoxLayout, QLabel, QMessageBox, QPushButton,
-                            QTableWidget, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
 # Local imports
-from spyder.config.base import _, running_under_pytest
+from spyder.api.translations import _
+from spyder.api.widgets.dialogs import SpyderDialogButtonBox
+from spyder.config.base import running_under_pytest
 
 
 class RecoveryDialog(QDialog):
@@ -64,13 +75,13 @@ class RecoveryDialog(QDialog):
         """Reimplement Qt method."""
         if self.splash is not None:
             self.splash.show()
-        super(RecoveryDialog, self).accept()
+        super().accept()
 
     def reject(self):
         """Reimplement Qt method."""
         if self.splash is not None:
             self.splash.show()
-        super(RecoveryDialog, self).reject()
+        super().reject()
 
     def gather_file_data(self, name):
         """
@@ -217,13 +228,15 @@ class RecoveryDialog(QDialog):
 
     def add_cancel_button(self):
         """Add a cancel button at the bottom of the dialog window."""
-        button_box = QDialogButtonBox(QDialogButtonBox.Cancel, self)
+        button_box = SpyderDialogButtonBox(
+            QDialogButtonBox.Cancel, parent=self
+        )
         button_box.rejected.connect(self.reject)
         self.layout.addWidget(button_box)
 
     def center(self):
         """Center the dialog."""
-        screen = QApplication.desktop().screenGeometry(0)
+        screen = self.screen().geometry()
         x = int(screen.center().x() - self.width() / 2)
         y = int(screen.center().y() - self.height() / 2)
         self.move(x, y)
@@ -273,7 +286,7 @@ class RecoveryDialog(QDialog):
         heading = _('Error message:')
         msgbox = QMessageBox(
             QMessageBox.Critical, _('Restore'),
-            _('<b>{}</b><br><br>{}<br>{}').format(text, heading, error),
+            '<b>{}</b><br><br>{}<br>{}'.format(text, heading, error),
             parent=self)
         msgbox.exec_()
 
@@ -296,7 +309,7 @@ class RecoveryDialog(QDialog):
         """Execute dialog window."""
         if running_under_pytest():
             return QDialog.Accepted
-        return super(RecoveryDialog, self).exec_()
+        return super().exec_()
 
 
 def make_temporary_files(tempdir):
@@ -352,7 +365,7 @@ def test():  # pragma: no cover
     import tempfile
     from spyder.utils.qthelpers import qapplication
 
-    app = qapplication()
+    app = qapplication()  # noqa
     tempdir = tempfile.mkdtemp()
     unused, unused, autosave_mapping = make_temporary_files(tempdir)
     dialog = RecoveryDialog(autosave_mapping)

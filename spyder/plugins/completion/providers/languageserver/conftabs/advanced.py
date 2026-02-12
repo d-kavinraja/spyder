@@ -18,7 +18,7 @@ from qtpy.QtWidgets import (QGroupBox, QGridLayout, QLabel, QMessageBox,
 
 # Local imports
 from spyder.api.preferences import SpyderPreferencesTab
-from spyder.config.base import _
+from spyder.api.translations import _
 from spyder.utils.misc import check_connection_port
 
 
@@ -157,7 +157,7 @@ class AdvancedConfigTab(SpyderPreferencesTab):
                   "If that's the case, please reset your Spyder preferences "
                   "by going to the menu"
                   "<br><br>"
-                  "<tt>Tools > Reset Spyder to factory defaults</tt>"
+                  "<tt>Tools > Reset all preferences to default</tt>"
                   "<br><br>"
                   "instead of reporting a bug."))
 

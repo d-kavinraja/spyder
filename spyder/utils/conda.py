@@ -7,12 +7,22 @@
 """Conda/anaconda utilities."""
 
 # Standard library imports
+from functools import lru_cache
 from glob import glob
 import json
 import os
 import os.path as osp
 import sys
 
+# Third-party imports
+from packaging.version import parse
+from spyder_kernels.utils.pythonenv import (
+    add_quotes,
+    get_conda_env_path,
+    is_conda_env,
+)
+
+# Local imports
 from spyder.utils.programs import find_program, run_program, run_shell_command
 from spyder.config.base import is_conda_based_app
 
@@ -20,24 +30,22 @@ WINDOWS = os.name == 'nt'
 CONDA_ENV_LIST_CACHE = {}
 
 
-def add_quotes(path):
-    """Return quotes if needed for spaces on path."""
-    quotes = '"' if ' ' in path and '"' not in path else ''
-    return '{quotes}{path}{quotes}'.format(quotes=quotes, path=path)
+def _env_for_conda():
+    """
+    Required environment variables for Conda to work as expected.
 
+    Notes
+    -----
+    This is needed on Windows since Conda 23.9.0
+    """
+    env = {}
+    if os.name == 'nt':
+        env_vars = [("HOMEDRIVE", "C:"), ("HOMEPATH", "\\Users\\xxxxx")]
+        for var, default in env_vars:
+            value = os.environ.get(var, default)
+            env[var] = value
 
-def is_conda_env(prefix=None, pyexec=None):
-    """Check if prefix or python executable are in a conda environment."""
-    if pyexec is not None:
-        pyexec = pyexec.replace('\\', '/')
-
-    if (prefix is None and pyexec is None) or (prefix and pyexec):
-        raise ValueError('Only `prefix` or `pyexec` should be provided!')
-
-    if pyexec and prefix is None:
-        prefix = get_conda_env_path(pyexec).replace('\\', '/')
-
-    return os.path.exists(os.path.join(prefix, 'conda-meta'))
+    return env
 
 
 def get_conda_root_prefix(pyexec=None, quote=False):
@@ -65,32 +73,19 @@ def get_conda_root_prefix(pyexec=None, quote=False):
     return root_prefix
 
 
-def get_conda_env_path(pyexec, quote=False):
+def find_conda(pyexec=None):
     """
-    Return the full path to the conda environment from give python executable.
+    Find conda executable.
 
-    If `quote` is True, then quotes are added if spaces are found in the path.
+    `pyexec` is a python executable, the relative location from which to
+    attempt to locate a conda executable.
     """
-    pyexec = pyexec.replace('\\', '/')
-    if os.name == 'nt':
-        conda_env = os.path.dirname(pyexec)
-    else:
-        conda_env = os.path.dirname(os.path.dirname(pyexec))
-
-    if quote:
-        conda_env = add_quotes(conda_env)
-
-    return conda_env
-
-
-def find_conda():
-    """Find conda executable."""
     conda = None
 
     # First try Spyder's conda executable
     if is_conda_based_app():
         root = osp.dirname(os.environ['CONDA_EXE'])
-        conda = osp.join(root, 'mamba.exe' if WINDOWS else 'mamba')
+        conda = osp.join(root, 'conda.exe' if WINDOWS else 'conda')
 
     # Next try the environment variables
     if conda is None:
@@ -99,9 +94,31 @@ def find_conda():
     # Next try searching for the executable
     if conda is None:
         conda_exec = 'conda.bat' if WINDOWS else 'conda'
-        conda = find_program(conda_exec)
+        extra_paths = [
+            osp.join(get_conda_root_prefix(_pyexec), 'condabin')
+            for _pyexec in [sys.executable, pyexec]
+        ]
+        conda = find_program(conda_exec, extra_paths)
 
     return conda
+
+
+def find_pixi(pyexec=None):
+    """
+    Find pixi executable.
+
+    `pyexec` is a python executable, the relative location from which to
+    attempt to locate a pixi executable.
+    """
+    # Try the `PIXI_HOME` environment variable
+    pixi = os.environ.get('PIXI_HOME', None)
+
+    # Next try searching for the executable in default paths
+    if pixi is None:
+        pixi_exec = 'pixi.exe' if WINDOWS else 'pixi'
+        pixi = find_program(pixi_exec)
+
+    return pixi
 
 
 def get_list_conda_envs():
@@ -114,17 +131,27 @@ def get_list_conda_envs():
         return env_list
 
     cmdstr = ' '.join([conda, 'env', 'list', '--json'])
+
     try:
-        out, __ = run_shell_command(cmdstr, env={}).communicate()
+        out, __ = run_shell_command(cmdstr, env=_env_for_conda()).communicate()
         out = out.decode()
         out = json.loads(out)
     except Exception:
         out = {'envs': []}
 
     for env in out['envs']:
-        name = env.split(osp.sep)[-1]
+        data = env.split(osp.sep)
+        name = data[-1]
         path = osp.join(env, 'python.exe') if WINDOWS else osp.join(
             env, 'bin', 'python')
+
+        if (
+            # In case the environment doesn't have Python
+            not osp.isfile(path)
+            # Don't list the installers base env
+            or (is_conda_based_app(pyexec=path) and name != "spyder-runtime")
+        ):
+            continue
 
         try:
             version, __ = run_program(path, ['--version']).communicate()
@@ -134,7 +161,33 @@ def get_list_conda_envs():
 
         name = ('base' if name.lower().startswith('anaconda') or
                 name.lower().startswith('miniconda') else name)
-        name = 'conda: {}'.format(name)
+        name = 'Conda: {}'.format(name)
+
+        if name in env_list:
+            if not (path, version.strip()) == env_list[name]:
+                prev_info = env_list[name]
+                prev_data = prev_info[0]
+                prev_data = prev_data.split(osp.sep)
+                env_list.pop(name)
+                index_common_folder = 1
+                end_path = 1
+                if not WINDOWS:
+                    end_path = 2
+                for i in range(-1, -len(data) - 1, -1):
+                    if data[i] == prev_data[i - end_path]:
+                        index_common_folder += 1
+                    else:
+                        break
+                path_part = prev_data[
+                    -index_common_folder - end_path : -end_path
+                ]
+                prev_name = (
+                    f'Conda: '
+                    f'{"/".join(path_part)}'
+                )
+                env_list[prev_name] = prev_info
+                name = f'Conda: {"/".join(data[-index_common_folder:])}'
+
         env_list[name] = (path, version.strip())
 
     CONDA_ENV_LIST_CACHE = env_list
@@ -161,24 +214,84 @@ def get_spyder_conda_channel():
     conda = find_conda()
 
     if conda is None:
-        return None
+        return None, None
 
     env = get_conda_env_path(sys.executable)
     cmdstr = ' '.join([conda, 'list', 'spyder', '--json', '--prefix', env])
 
     try:
-        out, __ = run_shell_command(cmdstr, env={}).communicate()
+        out, __ = run_shell_command(cmdstr, env=_env_for_conda()).communicate()
         out = out.decode()
         out = json.loads(out)
     except Exception:
-        return None
+        return None, None
+
+    # Avoids iterating over non-dict objects
+    if 'error' in out:
+        return None, None
+
+    # These variables can be unassigned after the next for, so we need to give
+    # them a default value at this point.
+    # Fixes spyder-ide/spyder#22054
+    channel, channel_url = None, None
 
     for package_info in out:
         if package_info["name"] == 'spyder':
             channel = package_info["channel"]
             channel_url = package_info["base_url"]
 
-    if "<develop>" in channel_url:
+    if channel_url is not None and "<develop>" in channel_url:
         channel_url = None
 
     return channel, channel_url
+
+
+@lru_cache(maxsize=10)
+def conda_version(conda_executable=None):
+    """
+    Get the conda version if available.
+
+    Note: This function can get the version of other conda-like executables
+    like mamba, micromamba or pixi, as well as any executable that provides a
+    `--version` CLI argument.
+    """
+    version = parse('0')
+    if not conda_executable:
+        conda_executable = find_conda()
+    if not conda_executable:
+        return version
+    try:
+        version, __ = run_program(conda_executable, ['--version']).communicate()
+        version = parse(version.decode().split()[-1].strip())
+    except Exception:
+        pass
+    return version
+
+
+def validate_conda(conda_executable):
+    """
+    Validate that a path points to a working conda-like executable.
+
+    The function checks that the file exists, is executable, and that
+    calling it with `--version` identifies it as conda, mamba, or
+    micromamba.
+    """
+    valid = False
+    if conda_executable == "":
+        return True
+
+    if not os.path.isfile(conda_executable):
+        return False
+
+    if not os.access(conda_executable, os.X_OK):
+        return False
+
+    try:
+        out, __ = run_program(conda_executable, ['--version']).communicate()
+        if any(
+            tool in out.decode().lower()
+                for tool in ["micromamba", "mamba", "conda"]):
+            valid = True
+    except Exception:
+        return False
+    return valid

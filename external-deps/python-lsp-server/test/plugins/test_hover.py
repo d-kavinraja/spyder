@@ -10,7 +10,7 @@ from pylsp.workspace import Document
 DOC_URI = uris.from_fs_path(__file__)
 DOC = """
 
-def main():
+def main(a: float, b: float):
     \"\"\"hello world\"\"\"
     pass
 """
@@ -23,7 +23,7 @@ np.sin
 """
 
 
-def test_numpy_hover(workspace):
+def test_numpy_hover(workspace) -> None:
     # Over the blank line
     no_hov_position = {"line": 1, "character": 0}
     # Over 'numpy' in import numpy as np
@@ -59,7 +59,6 @@ def test_numpy_hover(workspace):
     )
 
     # https://github.com/davidhalter/jedi/issues/1746
-    # pylint: disable=import-outside-toplevel
     import numpy as np
 
     if np.lib.NumpyVersion(np.__version__) < "1.20.0":
@@ -72,7 +71,7 @@ def test_numpy_hover(workspace):
         )
 
 
-def test_hover(workspace):
+def test_hover(workspace) -> None:
     # Over 'main' in def main():
     hov_position = {"line": 2, "character": 6}
     # Over the blank second line
@@ -80,14 +79,48 @@ def test_hover(workspace):
 
     doc = Document(DOC_URI, workspace, DOC)
 
-    contents = {"kind": "markdown", "value": "```python\nmain()\n```\n\n\nhello world"}
+    contents = {
+        "kind": "markdown",
+        "value": "```python\nmain(a: float, b: float)\n```\n\n\nhello world",
+    }
 
     assert {"contents": contents} == pylsp_hover(doc._config, doc, hov_position)
 
     assert {"contents": ""} == pylsp_hover(doc._config, doc, no_hov_position)
 
 
-def test_document_path_hover(workspace_other_root_path, tmpdir):
+def test_hover_signature_formatting(workspace) -> None:
+    # Over 'main' in def main():
+    hov_position = {"line": 2, "character": 6}
+
+    doc = Document(DOC_URI, workspace, DOC)
+    # setting low line length should trigger reflow to multiple lines
+    doc._config.update({"signature": {"line_length": 10}})
+
+    contents = {
+        "kind": "markdown",
+        "value": "```python\nmain(\n    a: float,\n    b: float,\n)\n```\n\n\nhello world",
+    }
+
+    assert {"contents": contents} == pylsp_hover(doc._config, doc, hov_position)
+
+
+def test_hover_signature_formatting_opt_out(workspace) -> None:
+    # Over 'main' in def main():
+    hov_position = {"line": 2, "character": 6}
+
+    doc = Document(DOC_URI, workspace, DOC)
+    doc._config.update({"signature": {"line_length": 10, "formatter": None}})
+
+    contents = {
+        "kind": "markdown",
+        "value": "```python\nmain(a: float, b: float)\n```\n\n\nhello world",
+    }
+
+    assert {"contents": contents} == pylsp_hover(doc._config, doc, hov_position)
+
+
+def test_document_path_hover(workspace_other_root_path, tmpdir) -> None:
     # Create a dummy module out of the workspace's root_path and try to get
     # a definition on it in another file placed next to it.
     module_content = '''
@@ -110,3 +143,17 @@ foo"""
     contents = pylsp_hover(doc._config, doc, cursor_pos)["contents"]
 
     assert "A docstring for foo." in contents["value"]
+
+
+def test_hover_without_docstring(workspace_with_signature_docstring_disabled) -> None:
+    # Over 'main' in def main():
+    hov_position = {"line": 2, "character": 6}
+
+    doc = Document(DOC_URI, workspace_with_signature_docstring_disabled, DOC)
+
+    contents = {
+        "kind": "markdown",
+        "value": "```python\nmain(a: float, b: float)\n```\n",
+    }
+
+    assert {"contents": contents} == pylsp_hover(doc._config, doc, hov_position)

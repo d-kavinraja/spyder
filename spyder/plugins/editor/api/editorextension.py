@@ -16,11 +16,6 @@ Original file:
 <https://github.com/pyQode/pyqode.core/blob/master/pyqode/core/api/mode.py>
 """
 
-import logging
-
-
-logger = logging.getLogger(__name__)
-
 
 class EditorExtension(object):
     """
@@ -29,10 +24,8 @@ class EditorExtension(object):
     An extension is a "thing" that can be installed on an editor to add new
     behaviours or to modify its appearance.
 
-    A panel (model child class) is added to an editor by using the
-    PanelsManager:
-        - :meth:
-            `spyder.plugins.editor.widgets.codeeditor.CodeEditor.panels.append`
+    A panel (model child class) is added to an editor by using PanelsManager,
+    :meth:`spyder.plugins.editor.widgets.codeeditor.CodeEditor.panels.append`.
 
     Subclasses may/should override the following methods:
 
@@ -86,9 +79,6 @@ class EditorExtension(object):
         self._enabled = False
         self._editor = None
         self._on_close = False
-
-    def __del__(self):
-        logger.debug('%s.__del__', type(self))
 
     def on_install(self, editor):
         """

@@ -7,12 +7,11 @@ from pylsp import uris
 from pylsp.plugins.definition import pylsp_definitions
 from pylsp.workspace import Document
 
-
 DOC_URI = uris.from_fs_path(__file__)
 DOC = """def a():
     pass
 
-print a()
+print(a())
 
 
 class Directory(object):
@@ -21,10 +20,28 @@ class Directory(object):
 
     def add_member(self, id, name):
         self.members[id] = name
+
+
+subscripted_before_reference = {}
+subscripted_before_reference[0] = 0
+subscripted_before_reference
+
+
+def my_func():
+    print('called')
+
+alias = my_func
+my_list = [1, None, alias]
+inception = my_list[2]
+
+inception()
+
+import numpy
+numpy.ones
 """
 
 
-def test_definitions(config, workspace):
+def test_definitions(config, workspace) -> None:
     # Over 'a' in print a
     cursor_pos = {"line": 3, "character": 6}
 
@@ -40,7 +57,50 @@ def test_definitions(config, workspace):
     )
 
 
-def test_builtin_definition(config, workspace):
+def test_indirect_definitions(config, workspace) -> None:
+    # Over 'subscripted_before_reference'
+    cursor_pos = {"line": 16, "character": 0}
+
+    # The definition of 'subscripted_before_reference',
+    # skipping intermediate writes to the most recent definition
+    def_range = {
+        "start": {"line": 14, "character": 0},
+        "end": {"line": 14, "character": len("subscripted_before_reference")},
+    }
+
+    doc = Document(DOC_URI, workspace, DOC)
+    assert [{"uri": DOC_URI, "range": def_range}] == pylsp_definitions(
+        config, doc, cursor_pos
+    )
+
+
+def test_definition_with_multihop_inference_goto(config, workspace) -> None:
+    # Over 'inception()'
+    cursor_pos = {"line": 26, "character": 0}
+
+    # The most recent definition of 'inception',
+    # ignoring alias hops
+    def_range = {
+        "start": {"line": 24, "character": 0},
+        "end": {"line": 24, "character": len("inception")},
+    }
+
+    doc = Document(DOC_URI, workspace, DOC)
+    assert [{"uri": DOC_URI, "range": def_range}] == pylsp_definitions(
+        config, doc, cursor_pos
+    )
+
+
+def test_numpy_definition(config, workspace) -> None:
+    # Over numpy.ones
+    cursor_pos = {"line": 29, "character": 8}
+
+    doc = Document(DOC_URI, workspace, DOC)
+    defns = pylsp_definitions(config, doc, cursor_pos)
+    assert len(defns) > 0, defns
+
+
+def test_builtin_definition(config, workspace) -> None:
     # Over 'i' in dict
     cursor_pos = {"line": 8, "character": 24}
 
@@ -64,7 +124,7 @@ def test_builtin_definition(config, workspace):
     config.update(orig_settings)
 
 
-def test_assignment(config, workspace):
+def test_assignment(config, workspace) -> None:
     # Over 's' in self.members[id]
     cursor_pos = {"line": 11, "character": 19}
 
@@ -80,7 +140,7 @@ def test_assignment(config, workspace):
     )
 
 
-def test_document_path_definitions(config, workspace_other_root_path, tmpdir):
+def test_document_path_definitions(config, workspace_other_root_path, tmpdir) -> None:
     # Create a dummy module out of the workspace's root_path and try to get
     # a definition on it in another file placed next to it.
     module_content = """

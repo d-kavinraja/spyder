@@ -7,10 +7,54 @@
 """
 Spyder application menu constants.
 """
+
 # Local imports
 from spyder.api.widgets.menus import SpyderMenu
+from spyder.utils.palette import SpyderPalette
+from spyder.utils.stylesheet import AppStyle, SpyderStyleSheet
 
 
+# ---- Stylesheet
+# -----------------------------------------------------------------------------
+class _MenuBarStylesheet(SpyderStyleSheet):
+    """Stylesheet for menubars used in Spyder."""
+
+    def set_stylesheet(self):
+        css = self.get_stylesheet()
+
+        # Set the same color as the one used for the app toolbar
+        css.QMenuBar.setValues(
+            backgroundColor=SpyderPalette.COLOR_BACKGROUND_4
+        )
+
+        # Give more padding and margin to items
+        css['QMenuBar::item'].setValues(
+            padding=f'{2 * AppStyle.MarginSize}px',
+            margin='0px 2px'
+        )
+
+        # Remove padding when pressing main menus
+        css['QMenuBar::item:pressed'].setValues(
+            padding='0px'
+        )
+
+        # Set hover and pressed state of items in the menu bar
+        for state in ['selected', 'pressed']:
+            # Don't use a different color for the QMenuBar pressed state
+            # because a lighter color has too little contrast with the text.
+            bg_color = SpyderPalette.COLOR_BACKGROUND_5
+
+            css[f"QMenuBar::item:{state}"].setValues(
+                backgroundColor=bg_color,
+                borderRadius=SpyderPalette.SIZE_BORDER_RADIUS
+            )
+
+
+MENUBAR_STYLESHEET = _MenuBarStylesheet()
+
+
+# ---- Menu constants
+# -----------------------------------------------------------------------------
 class ApplicationContextMenu:
     Documentation = 'context_documentation_section'
     About = 'context_about_section'
@@ -26,7 +70,9 @@ class ApplicationMenus:
     Consoles = 'consoles_menu'
     Projects = 'projects_menu'
     Tools = 'tools_menu'
-    View = 'view_menu'
+    Window = 'window_menu'
+    # For backward compat with plugins targeting Spyder <6.1
+    View = 'window_menu'
     Help = 'help_menu'
 
 
@@ -45,25 +91,26 @@ class EditMenuSections:
     UndoRedo = 'undo_redo_section'
     Copy = 'copy_section'
     Editor = 'editor_section'
+    Formatting = 'formatting_section'
 
 
 class SearchMenuSections:
     FindInText = 'find_text_section'
+    Cursor = 'cursor_section'
     FindInFiles = 'find_files_section'
 
 
 class SourceMenuSections:
     Options = 'options_section'
     Linting = 'linting_section'
-    Cursor = 'cursor_section'
-    Formatting = 'formatting_section'
-    CodeAnalysis = 'code_analysis_section'
+    Autofix = 'autofix_section'
 
 
 class RunMenuSections:
     Run = 'run_section'
     RunExtras = 'run_extras_section'
     RunInExecutors = 'executors_section'
+    Profile = 'profile_section'
 
 class DebugMenuSections:
     StartDebug = 'start_debug_section'
@@ -83,12 +130,11 @@ class ProjectsMenuSections:
 
 
 class ToolsMenuSections:
-    Tools = 'tools_section'
-    External = 'external_section'
-    Extras = 'extras_section'
+    Managers = 'managers_section'
+    Preferences = 'preferences_section'
 
 
-class ViewMenuSections:
+class WindowMenuSections:
     Top = 'top_section'
     Pane = 'pane_section'
     Toolbar = 'toolbar_section'
@@ -96,17 +142,24 @@ class ViewMenuSections:
     Bottom = 'bottom_section'
 
 
+# For backward compat with plugins targeting Spyder <6.1
+ViewMenuSections = WindowMenuSections
+
+
 class HelpMenuSections:
     Documentation = 'documentation_section'
-    Support = 'support_section'
     ExternalDocumentation = 'external_documentation_section'
+    Support = 'support_section'
     About = 'about_section'
 
 
+# ---- App menu class
+# -----------------------------------------------------------------------------
 class ApplicationMenu(SpyderMenu):
     """
-    Spyder Main Window application Menu.
+    Spyder main window application menu.
 
-    This class provides application menus with some predefined functionality
-    and section definition.
+    This class provides application menus with some predefined functionality.
     """
+
+    APP_MENU = True

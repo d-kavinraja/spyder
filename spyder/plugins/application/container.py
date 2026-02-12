@@ -11,39 +11,53 @@ Holds references for base actions in the Application of Spyder.
 """
 
 # Standard library imports
-import os
-import subprocess
-import sys
+import functools
 import glob
+import os
+import os.path as osp
+import sys
+from typing import Optional
 
 # Third party imports
-from packaging.version import parse
-from qtpy.QtCore import Qt, QThread, QTimer, Signal, Slot
+from qtpy.compat import getopenfilenames
+from qtpy.QtCore import QDir, Qt, QThread, QTimer, Signal, Slot
 from qtpy.QtGui import QGuiApplication
-from qtpy.QtWidgets import QAction, QMessageBox, QPushButton
+from qtpy.QtWidgets import (
+    QAction,
+    QFileDialog,
+    QInputDialog,
+    QMessageBox,
+    QPushButton,
+)
 
 # Local imports
 from spyder import __docs_url__, __forum_url__, __trouble_url__
 from spyder import dependencies
 from spyder.api.translations import _
 from spyder.api.widgets.main_container import PluginMainContainer
-from spyder.utils.installers import InstallerMissingDependencies
-from spyder.config.utils import is_anaconda
-from spyder.config.base import (get_conf_path, get_debug_level,
-                                is_conda_based_app)
-from spyder.plugins.application.widgets.status import ApplicationUpdateStatus
+from spyder.config.base import (
+    get_conf_path,
+    get_debug_level,
+    running_under_pytest,
+)
+from spyder.config.utils import (
+    get_edit_filetypes,
+    get_edit_filters,
+    get_filter,
+)
+from spyder.plugins.application.widgets import AboutDialog, InAppAppealStatus
 from spyder.plugins.console.api import ConsoleActions
-from spyder.utils.conda import is_anaconda_pkg, get_spyder_conda_channel
+from spyder.utils.icon_manager import ima
+from spyder.utils.installers import InstallerMissingDependencies
 from spyder.utils.environ import UserEnvDialog
 from spyder.utils.qthelpers import start_file, DialogManager
-from spyder.widgets.about import AboutDialog
 from spyder.widgets.dependencies import DependenciesDialog
 from spyder.widgets.helperwidgets import MessageCheckBox
-from spyder.workers.updates import WorkerUpdates
 
 
 class ApplicationPluginMenus:
     DebugLogsMenu = "debug_logs_menu"
+    RecentFilesMenu = "recent_files_menu"
 
 
 class LogsMenuSections:
@@ -53,26 +67,52 @@ class LogsMenuSections:
 
 # Actions
 class ApplicationActions:
+    # For actions with shortcuts, the name of the action needs to match the
+    # name of the shortcut so 'spyder documentation' is used instead of
+    # something like 'spyder_documentation'
+
     # Help
-    # The name of the action needs to match the name of the shortcut so
-    # 'spyder documentation' is used instead of something
-    # like 'spyder_documentation'
     SpyderDocumentationAction = "spyder documentation"
     SpyderDocumentationVideoAction = "spyder_documentation_video_action"
     SpyderTroubleshootingAction = "spyder_troubleshooting_action"
     SpyderDependenciesAction = "spyder_dependencies_action"
-    SpyderCheckUpdatesAction = "spyder_check_updates_action"
     SpyderSupportAction = "spyder_support_action"
+    ShowChangelogAction = "show_changelog_action"
+    HelpSpyderAction = "help_spyder_action"
     SpyderAbout = "spyder_about_action"
 
     # Tools
     SpyderUserEnvVariables = "spyder_user_env_variables_action"
 
     # File
-    # The name of the action needs to match the name of the shortcut
-    # so 'Restart' is used instead of something like 'restart_action'
+    NewFile = "New file"
+    OpenFile = "Open file"
+    OpenLastClosed = "Open last closed"
+    MaxRecentFiles = "max_recent_files_action"
+    ClearRecentFiles = "clear_recent_files_action"
+    SaveFile = "Save file"
+    SaveAll = "Save all"
+    SaveAs = "Save as"
+    SaveCopyAs = "save_copy_as_action"
+    RevertFile = "Revert file"
+    CloseFile = "Close file"
+    CloseAll = "Close all"
     SpyderRestart = "Restart"
     SpyderRestartDebug = "Restart in debug mode"
+
+    # Edit
+    Undo = "Undo"
+    Redo = "Redo"
+    Copy = "Copy"
+    Cut = "Cut"
+    Paste = "Paste"
+    SelectAll = "Select All"
+
+    # Find/Search operations
+    FindText = "Find text"
+    FindNext = "Find next"
+    FindPrevious = "Find previous"
+    ReplaceText = "Replace text"
 
 
 class ApplicationContainer(PluginMainContainer):
@@ -87,6 +127,115 @@ class ApplicationContainer(PluginMainContainer):
     Signal to load a log file
     """
 
+    sig_new_file_requested = Signal()
+    """
+    Signal to request that a new file be created in a suitable plugin.
+    """
+
+    sig_open_file_in_plugin_requested = Signal(str)
+    """
+    Signal to request that given file is opened in a suitable plugin.
+
+    Arguments
+    ---------
+    filename : str
+    """
+
+    sig_open_file_using_dialog_requested = Signal()
+    """
+    Signal to request that the Open File dialog is shown to open a file.
+    """
+
+    sig_open_last_closed_requested = Signal()
+    """
+    Signal to request that the last closed file be opened again.
+    """
+
+    sig_save_file_requested = Signal()
+    """
+    Signal to request that the current file be saved.
+    """
+
+    sig_save_all_requested = Signal()
+    """
+    Signal to request that all files in the current plugin be saved.
+    """
+
+    sig_save_file_as_requested = Signal()
+    """
+    Signal to request that the current file be saved under a different name.
+    """
+
+    sig_save_copy_as_requested = Signal()
+    """
+    Signal to request that copy of current file be saved under a new name.
+    """
+
+    sig_revert_file_requested = Signal()
+    """
+    Signal to request that the current file be reverted from disk.
+    """
+
+    sig_close_file_requested = Signal()
+    """
+    Signal to request that the current file be closed.
+    """
+
+    sig_close_all_requested = Signal()
+    """
+    Signal to request that all open files be closed.
+    """
+
+    sig_undo_requested = Signal()
+    """
+    Signal to request an undo operation.
+    """
+
+    sig_redo_requested = Signal()
+    """
+    Signal to request a redo operation.
+    """
+
+    sig_cut_requested = Signal()
+    """
+    Signal to request a cut operation.
+    """
+
+    sig_copy_requested = Signal()
+    """
+    Signal to request a copy operation.
+    """
+
+    sig_paste_requested = Signal()
+    """
+    Signal to request a paste operation.
+    """
+
+    sig_select_all_requested = Signal()
+    """
+    Signal to request that all text is selected.
+    """
+
+    sig_find_requested = Signal()
+    """
+    Signal to request to find text.
+    """
+
+    sig_find_next_requested = Signal()
+    """
+    Signal to request to find the next text occurrence.
+    """
+
+    sig_find_previous_requested = Signal()
+    """
+    Signal to request to find the previous text occurrence.
+    """
+
+    sig_replace_requested = Signal()
+    """
+    Signal to request to replace a text occurrence.
+    """
+
     def __init__(self, name, plugin, parent=None):
         super().__init__(name, plugin, parent)
 
@@ -94,8 +243,8 @@ class ApplicationContainer(PluginMainContainer):
         self.current_dpi = None
         self.dpi_messagebox = None
 
-        # Keep track of the downloaded installer executable for updates
-        self.installer_path = None
+        # Keep track of list of recent files
+        self.recent_files = self.get_conf('recent_files', [])
 
     # ---- PluginMainContainer API
     # -------------------------------------------------------------------------
@@ -107,19 +256,7 @@ class ApplicationContainer(PluginMainContainer):
 
         # Attributes
         self.dialog_manager = DialogManager()
-        self.application_update_status = None
-        if is_conda_based_app():
-            self.application_update_status = ApplicationUpdateStatus(
-                parent=self)
-            (self.application_update_status.sig_check_for_updates_requested
-             .connect(self.check_updates))
-            (self.application_update_status.sig_install_on_close_requested
-                 .connect(self.set_installer_path))
-            self.application_update_status.set_no_status()
-        self.give_updates_feedback = False
-        self.thread_updates = None
-        self.worker_updates = None
-        self.updates_timer = None
+        self.inapp_appeal_status = InAppAppealStatus(self)
 
         # Actions
         # Documentation actions
@@ -143,7 +280,7 @@ class ApplicationContainer(PluginMainContainer):
         # Support actions
         self.trouble_action = self.create_action(
             ApplicationActions.SpyderTroubleshootingAction,
-            _("Troubleshooting..."),
+            _("Troubleshooting guide"),
             triggered=lambda: start_file(__trouble_url__))
         self.report_action = self.create_action(
             ConsoleActions.SpyderReportAction,
@@ -152,22 +289,30 @@ class ApplicationContainer(PluginMainContainer):
             triggered=self.sig_report_issue_requested)
         self.dependencies_action = self.create_action(
             ApplicationActions.SpyderDependenciesAction,
-            _("Dependencies..."),
+            _("Dependency status"),
             triggered=self.show_dependencies,
             icon=self.create_icon('advanced'))
-        self.check_updates_action = self.create_action(
-            ApplicationActions.SpyderCheckUpdatesAction,
-            _("Check for updates..."),
-            triggered=self.check_updates)
         self.support_group_action = self.create_action(
             ApplicationActions.SpyderSupportAction,
-            _("Spyder support..."),
+            _("Spyder Google group"),
             triggered=lambda: start_file(__forum_url__))
+
+        self.create_action(
+            ApplicationActions.ShowChangelogAction,
+            _("Show changelog"),
+            triggered=self.inapp_appeal_status.show_changelog,
+        )
+        self.create_action(
+            ApplicationActions.HelpSpyderAction,
+            _("Help Spyder..."),
+            icon=self.create_icon("inapp_appeal"),
+            triggered=self.inapp_appeal_status.show_appeal,
+        )
 
         # About action
         self.about_action = self.create_action(
             ApplicationActions.SpyderAbout,
-            _("About %s...") % "Spyder",
+            _("About %s") % "Spyder",
             icon=self.create_icon('MessageBoxInformation'),
             triggered=self.show_about,
             menurole=QAction.AboutRole)
@@ -181,7 +326,7 @@ class ApplicationContainer(PluginMainContainer):
                     "sessions)")
         self.user_env_action = self.create_action(
             ApplicationActions.SpyderUserEnvVariables,
-            _("Current user environment variables..."),
+            _("User environment variables"),
             icon=self.create_icon('environment'),
             tip=tip,
             triggered=self.show_user_env_variables)
@@ -206,6 +351,191 @@ class ApplicationContainer(PluginMainContainer):
             shortcut_context="_",
             register_shortcut=True)
 
+        # File actions
+        self.new_action = self.create_action(
+            ApplicationActions.NewFile,
+            text=_("&New file..."),
+            icon=self.create_icon('filenew'),
+            tip=_("New file"),
+            triggered=self.sig_new_file_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.open_action = self.create_action(
+            ApplicationActions.OpenFile,
+            text=_("&Open..."),
+            icon=self.create_icon('fileopen'),
+            tip=_("Open file"),
+            triggered=self.sig_open_file_using_dialog_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.open_last_closed_action = self.create_action(
+            ApplicationActions.OpenLastClosed,
+            text=_("O&pen last closed"),
+            tip=_("Open last closed"),
+            triggered=self.sig_open_last_closed_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.recent_files_menu = self.create_menu(
+            ApplicationPluginMenus.RecentFilesMenu,
+            title=_("Open &recent")
+        )
+        self.recent_files_menu.aboutToShow.connect(
+            self.update_recent_files_menu
+        )
+        self.max_recent_action = self.create_action(
+            ApplicationActions.MaxRecentFiles,
+            text=_("Maximum number of recent files..."),
+            triggered=self.change_max_recent_files
+        )
+        self.clear_recent_action = self.create_action(
+            ApplicationActions.ClearRecentFiles,
+            text=_("Clear this list"),
+            tip=_("Clear recent files list"),
+            triggered=self.clear_recent_files
+        )
+        self.save_action = self.create_action(
+            ApplicationActions.SaveFile,
+            text=_("&Save"),
+            icon=self.create_icon('filesave'),
+            tip=_("Save file"),
+            triggered=self.sig_save_file_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.save_all_action = self.create_action(
+            ApplicationActions.SaveAll,
+            text=_("Sav&e all"),
+            icon=self.create_icon('save_all'),
+            tip=_("Save all files"),
+            triggered=self.sig_save_all_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.save_as_action = self.create_action(
+            ApplicationActions.SaveAs,
+            text=_("Save &as"),
+            icon=self.create_icon('filesaveas'),
+            tip=_("Save current file as..."),
+            triggered=self.sig_save_file_as_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.save_copy_as_action = self.create_action(
+            ApplicationActions.SaveCopyAs,
+            text=_("Save copy as..."),
+            icon=self.create_icon('filesaveas'),
+            tip=_("Save copy of current file as..."),
+            triggered=self.sig_save_copy_as_requested.emit
+        )
+        self.revert_action = self.create_action(
+            ApplicationActions.RevertFile,
+            text=_("&Revert"),
+            icon=self.create_icon('revert'),
+            tip=_("Revert file from disk"),
+            triggered=self.sig_revert_file_requested.emit
+        )
+        self.close_file_action = self.create_action(
+            ApplicationActions.CloseFile,
+            text=_("&Close"),
+            icon=self.create_icon('fileclose'),
+            tip=_("Close current file"),
+            triggered=self.sig_close_file_requested.emit
+        )
+        self.close_all_action = self.create_action(
+            ApplicationActions.CloseAll,
+            text=_("C&lose all"),
+            icon=ima.icon('filecloseall'),
+            tip=_("Close all opened files"),
+            triggered=self.sig_close_all_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+
+        # Edit actions
+        self.undo_action = self.create_action(
+            ApplicationActions.Undo,
+            text=_('Undo'),
+            icon=self.create_icon('undo'),
+            triggered=self.sig_undo_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.redo_action = self.create_action(
+            ApplicationActions.Redo,
+            text=_('Redo'),
+            icon=self.create_icon('redo'),
+            triggered=self.sig_redo_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.cut_action = self.create_action(
+            ApplicationActions.Cut,
+            text=_('Cut'),
+            icon=self.create_icon('editcut'),
+            triggered=self.sig_cut_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.copy_action = self.create_action(
+            ApplicationActions.Copy,
+            text=_('Copy'),
+            icon=self.create_icon('editcopy'),
+            triggered=self.sig_copy_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.paste_action = self.create_action(
+            ApplicationActions.Paste,
+            text=_('Paste'),
+            icon=self.create_icon('editpaste'),
+            triggered=self.sig_paste_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+        self.select_all_action = self.create_action(
+            ApplicationActions.SelectAll,
+            text=_('Select All'),
+            icon=self.create_icon('selectall'),
+            triggered=self.sig_select_all_requested.emit,
+            shortcut_context="main",
+            register_shortcut=True
+        )
+
+        # Search actions
+        self.find_action = self.create_action(
+            ApplicationActions.FindText,
+            text=_("&Find text"),
+            icon=self.create_icon('find'),
+            tip=_("Find text"),
+            triggered=self.sig_find_requested,
+            shortcut_context="find_replace",
+        )
+        self.find_next_action = self.create_action(
+            ApplicationActions.FindNext,
+            text=_("Find &next"),
+            icon=self.create_icon('findnext'),
+            triggered=self.sig_find_next_requested,
+            shortcut_context="find_replace",
+        )
+        self.find_previous_action = self.create_action(
+            ApplicationActions.FindPrevious,
+            text=_("Find &previous"),
+            icon=ima.icon('findprevious'),
+            triggered=self.sig_find_previous_requested,
+            shortcut_context="find_replace",
+        )
+        self.replace_action = self.create_action(
+            ApplicationActions.ReplaceText,
+            text=_("&Replace text"),
+            icon=ima.icon('replace'),
+            tip=_("Replace text"),
+            triggered=self.sig_replace_requested,
+            shortcut_context="find_replace",
+        )
+
         # Debug logs
         if get_debug_level() >= 2:
             self.menu_debug_logs = self.create_menu(
@@ -218,6 +548,10 @@ class ApplicationContainer(PluginMainContainer):
             self.menu_debug_logs.aboutToShow.connect(
                 self.create_debug_log_actions)
 
+        # File types and filters used by the Open dialog
+        self.edit_filetypes = None
+        self.edit_filters = None
+
     def update_actions(self):
         pass
 
@@ -226,19 +560,10 @@ class ApplicationContainer(PluginMainContainer):
     def on_close(self):
         """To call from Spyder when the plugin is closed."""
         self.dialog_manager.close_all()
-        if self.updates_timer is not None:
-            self.updates_timer.stop()
-        if self.thread_updates is not None:
-            self.thread_updates.quit()
-            self.thread_updates.wait()
+        self.set_conf('recent_files', self.recent_files)
         if self.dependencies_thread is not None:
             self.dependencies_thread.quit()
             self.dependencies_thread.wait()
-
-        # Run installer after Spyder is closed
-        cmd = ('start' if os.name == 'nt' else 'open')
-        if self.installer_path:
-            subprocess.Popen(' '.join([cmd, self.installer_path]), shell=True)
 
     @Slot()
     def show_about(self):
@@ -250,226 +575,6 @@ class ApplicationContainer(PluginMainContainer):
     def show_user_env_variables(self):
         """Show Windows current user environment variables."""
         self.dialog_manager.show(UserEnvDialog(self))
-
-    # ---- Updates
-    # -------------------------------------------------------------------------
-
-    def _check_updates_ready(self):
-        """Show results of the Spyder update checking process."""
-
-        # `feedback` = False is used on startup, so only positive feedback is
-        # given. `feedback` = True is used when after startup (when using the
-        # menu action, and gives feeback if updates are, or are not found.
-        feedback = self.give_updates_feedback
-
-        # Get results from worker
-        update_available = self.worker_updates.update_available
-        latest_release = self.worker_updates.latest_release
-        error_msg = self.worker_updates.error
-
-        url_i = 'https://docs.spyder-ide.org/current/installation.html'
-
-        # Define the custom QMessageBox
-        box = MessageCheckBox(icon=QMessageBox.Information,
-                              parent=self)
-        box.setWindowTitle(_("New Spyder version"))
-        box.setAttribute(Qt.WA_ShowWithoutActivating)
-        box.set_checkbox_text(_("Check for updates at startup"))
-        box.setStandardButtons(QMessageBox.Ok)
-        box.setDefaultButton(QMessageBox.Ok)
-        box.setTextFormat(Qt.RichText)
-
-        # Adjust the checkbox depending on the stored configuration
-        option = 'check_updates_on_startup'
-        box.set_checked(self.get_conf(option))
-
-        header = _(
-            "<h3>Spyder {} is available!</h3><br>"
-        ).format(latest_release)
-
-        if error_msg is not None:
-            box.setText(error_msg)
-            box.set_check_visible(False)
-            box.show()
-            if self.application_update_status:
-                self.application_update_status.set_no_status()
-        elif update_available:
-            if self.application_update_status:
-                self.application_update_status.set_status_pending(
-                    latest_release)
-
-            # Update using our installers
-            if parse(latest_release) >= parse("6.0.0"):
-                box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-                box.setDefaultButton(QMessageBox.Yes)
-
-                if not is_conda_based_app():
-                    installers_url = url_i + "#standalone-installers"
-                    msg = (
-                        header +
-                        _("Would you like to automatically download and "
-                          "install it using Spyder's installer?"
-                          "<br><br>"
-                          "We <a href='{}'>recommend our own installer</a> "
-                          "because it's more stable and makes updating easy. "
-                          "This will leave your existing Spyder installation "
-                          "untouched.").format(installers_url)
-                    )
-                else:
-                    msg = (
-                        header +
-                        _("Would you like to automatically download "
-                          "and install it?")
-                    )
-
-                box.setText(msg)
-                box.exec_()
-                if box.result() == QMessageBox.Yes:
-                    self.application_update_status.start_installation(
-                        latest_release=latest_release)
-
-            # Manual update
-            if (
-                not box.result()  # The installer dialog was skipped
-                or (
-                    box.result() == QMessageBox.No
-                    and not is_conda_based_app()
-                )
-            ):
-                # Update-at-startup checkbox visible only if manual update
-                # is first message box
-                box.set_check_visible(not box.result())
-                box.setStandardButtons(QMessageBox.Ok)
-                box.setDefaultButton(QMessageBox.Ok)
-
-                msg = ""
-                if not box.result():
-                    msg += header
-
-                if os.name == "nt":
-                    if is_anaconda():
-                        msg += _("Run the following command or commands in "
-                                 "the Anaconda prompt to update manually:"
-                                 "<br><br>")
-                    else:
-                        msg += _("Run the following command in a cmd prompt "
-                                 "to update manually:<br><br>")
-                else:
-                    if is_anaconda():
-                        msg += _("Run the following command or commands in a "
-                                 "terminal to update manually:<br><br>")
-                    else:
-                        msg += _("Run the following command in a terminal to "
-                                 "update manually:<br><br>")
-
-                if is_anaconda():
-                    channel, __ = get_spyder_conda_channel()
-                    is_pypi = channel == 'pypi'
-
-                    if is_anaconda_pkg() and not is_pypi:
-                        msg += "<code>conda update anaconda</code><br>"
-
-                    if is_pypi:
-                        dont_mix_pip_conda_video = (
-                            "https://youtu.be/Ul79ihg41Rs"
-                        )
-
-                        msg += (
-                            "<code>pip install --upgrade spyder</code>"
-                            "<br><br><br>"
-                        )
-
-                        msg += _(
-                            "<b>Important note:</b> You installed Spyder with "
-                            "pip in a Conda environment, which is not a good "
-                            "idea. See <a href=\"{}\">our video</a> for more "
-                            "details about it."
-                        ).format(dont_mix_pip_conda_video)
-                    else:
-                        if channel == 'pkgs/main':
-                            channel = ''
-                        else:
-                            channel = f'-c {channel}'
-
-                        msg += (
-                            f"<code>conda install {channel} "
-                            f"spyder={latest_release}"
-                            f"</code><br><br><br>"
-                        )
-
-                        msg += _(
-                            "<b>Important note:</b> Since you installed "
-                            "Spyder with Anaconda, please don't use pip "
-                            "to update it as that will break your "
-                            "installation."
-                        )
-                else:
-                    msg += "<code>pip install --upgrade spyder</code><br>"
-
-                msg += _(
-                    "<br><br>For more information, visit our "
-                    "<a href=\"{}\">installation guide</a>."
-                ).format(url_i)
-
-                box.setText(msg)
-                box.show()
-        elif feedback:
-            box.setText(_("Spyder is up to date."))
-            box.show()
-            if self.application_update_status:
-                self.application_update_status.set_no_status()
-        else:
-            if self.application_update_status:
-                self.application_update_status.set_no_status()
-
-        self.set_conf(option, box.is_checked())
-
-        # Enable check_updates_action after the thread has finished
-        self.check_updates_action.setDisabled(False)
-
-        # Provide feeback when clicking menu if check on startup is on
-        self.give_updates_feedback = True
-
-    @Slot()
-    def check_updates(self, startup=False):
-        """Check for spyder updates on github releases using a QThread."""
-        # Disable check_updates_action while the thread is working
-        self.check_updates_action.setDisabled(True)
-        # !!! >>> Disable signals until alpha1
-        if is_conda_based_app():
-            self.application_update_status.blockSignals(True)
-            return
-        # !!! <<< Disable signals until alpha1
-        if self.application_update_status:
-            self.application_update_status.set_status_checking()
-
-        if self.thread_updates is not None:
-            self.thread_updates.quit()
-            self.thread_updates.wait()
-
-        self.thread_updates = QThread(None)
-        self.worker_updates = WorkerUpdates(self, startup=startup)
-        self.worker_updates.sig_ready.connect(self._check_updates_ready)
-        self.worker_updates.sig_ready.connect(self.thread_updates.quit)
-        self.worker_updates.moveToThread(self.thread_updates)
-        self.thread_updates.started.connect(self.worker_updates.start)
-
-        # Delay starting this check to avoid blocking the main window
-        # while loading.
-        # Fixes spyder-ide/spyder#15839
-        if startup:
-            self.updates_timer = QTimer(self)
-            self.updates_timer.setInterval(60000)
-            self.updates_timer.setSingleShot(True)
-            self.updates_timer.timeout.connect(self.thread_updates.start)
-            self.updates_timer.start()
-        else:
-            self.thread_updates.start()
-
-    @Slot(str)
-    def set_installer_path(self, installer_path):
-        """Set installer executable path to be run when closing."""
-        self.installer_path = installer_path
 
     # ---- Dependencies
     # -------------------------------------------------------------------------
@@ -580,6 +685,152 @@ class ApplicationContainer(PluginMainContainer):
 
         self.sig_restart_requested.emit()
 
+    # ---- File actions
+    # -------------------------------------------------------------------------
+    def open_file_using_dialog(self, filename: Optional[str], basedir: str):
+        """
+        Show Open File dialog and open the selected file.
+
+        Parameters
+        ----------
+        filename : Optional[str]
+            Name of currently active file. This is used to set the selected
+            name filter for the Open File dialog.
+        basedir : str
+            Directory initially displayed in the Open File dialog.
+        """
+        if self.edit_filetypes is None:
+            self.edit_filetypes = get_edit_filetypes()
+        if self.edit_filters is None:
+            self.edit_filters = get_edit_filters()
+
+        self.sig_redirect_stdio_requested.emit(False)
+        if filename is not None:
+            selectedfilter = get_filter(
+                self.edit_filetypes, osp.splitext(filename)[1]
+            )
+        else:
+            selectedfilter = ''
+
+        filenames = []
+        if not running_under_pytest():
+            # See: spyder-ide/spyder#3291
+            if sys.platform == 'darwin':
+                dialog = QFileDialog(
+                    parent=self,
+                    caption=_("Open file"),
+                    directory=basedir,
+                )
+                dialog.setNameFilters(self.edit_filters.split(';;'))
+                dialog.setOption(QFileDialog.HideNameFilterDetails, True)
+                dialog.setFilter(
+                    QDir.AllDirs | QDir.Files | QDir.Drives | QDir.Hidden
+                )
+                dialog.setFileMode(QFileDialog.ExistingFiles)
+
+                if dialog.exec_():
+                    filenames = dialog.selectedFiles()
+            else:
+                filenames, _sf = getopenfilenames(
+                    self,
+                    _("Open file"),
+                    basedir,
+                    self.edit_filters,
+                    selectedfilter=selectedfilter,
+                    options=QFileDialog.HideNameFilterDetails,
+                )
+        else:
+            # Use a Qt (i.e. scriptable) dialog for pytest
+            dialog = QFileDialog(
+                self, _("Open file"), options=QFileDialog.DontUseNativeDialog
+            )
+            if dialog.exec_():
+                filenames = dialog.selectedFiles()
+
+        self.sig_redirect_stdio_requested.emit(True)
+
+        for filename in filenames:
+            filename = osp.normpath(filename)
+            self.sig_open_file_in_plugin_requested.emit(filename)
+
+    def add_recent_file(self, fname: str) -> None:
+        """
+        Add file to the list of recent files.
+
+        This function adds the given file name to the list of recent files,
+        which is used in the `File > Open recent` menu. The function ensures
+        that the list has no duplicates and it is no longer than the maximum
+        length.
+        """
+        if fname in self.recent_files:
+            self.recent_files.remove(fname)
+        self.recent_files.insert(0, fname)
+        if len(self.recent_files) > self.get_conf('max_recent_files'):
+            self.recent_files.pop(-1)
+
+    def clear_recent_files(self) -> None:
+        """
+        Clear list of recent files.
+        """
+        self.recent_files = []
+
+    def update_recent_files_menu(self):
+        """
+        Update recent files menu
+
+        Add menu items for all the recent files to the menu. Also add items
+        for setting the maximum number and for clearing the list.
+
+        This function is called before the menu is about to be shown.
+        """
+        self.recent_files_menu.clear_actions()
+        recent_files = [
+            fname for fname in self.recent_files
+            if osp.isfile(fname)
+        ]
+        for fname in recent_files:
+            icon = ima.get_icon_by_extension_or_type(fname, scale_factor=1.0)
+            action = self.create_action(
+                name=f'Recent file {fname}',
+                text=fname,
+                icon=icon,
+                triggered=functools.partial(
+                    self.sig_open_file_in_plugin_requested.emit,
+                    fname
+                )
+            )
+            self.recent_files_menu.add_action(
+                action,
+                section='recent_files_section',
+                omit_id=True,
+                before_section='recent_files_actions_section'
+            )
+
+        self.clear_recent_action.setEnabled(len(recent_files) > 0)
+        for menu_action in (self.max_recent_action, self.clear_recent_action):
+            self.recent_files_menu.add_action(
+                menu_action,
+                section='recent_files_actions_section'
+            )
+
+        self.recent_files_menu.render()
+
+    def change_max_recent_files(self) -> None:
+        """
+        Change the maximum length of the list of recent files.
+        """
+        mrf, valid = QInputDialog.getInt(
+            self,
+            _('Editor'),
+            _('Maximum number of recent files'),
+            self.get_conf('max_recent_files'),
+            1,
+            35
+        )
+
+        if valid:
+            self.set_conf('max_recent_files', mrf)
+
     # ---- Log files
     # -------------------------------------------------------------------------
     def create_debug_log_actions(self):
@@ -617,7 +868,7 @@ class ApplicationContainer(PluginMainContainer):
             )
 
         # Render menu
-        self.menu_debug_logs._render()
+        self.menu_debug_logs.render()
 
     def load_log_file(self, file):
         """Load log file in editor"""

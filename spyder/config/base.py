@@ -12,6 +12,9 @@ This file only deals with non-GUI configuration features
 sip API incompatibility issue in spyder's non-gui modules)
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable
 from glob import glob
 import locale
 import os
@@ -59,6 +62,16 @@ def running_under_pytest():
     return bool(os.environ.get('SPYDER_PYTEST'))
 
 
+def running_remoteclient_tests():
+    """
+    Return True if currently running the remoteclient tests.
+
+    This function is used to do some adjustment for testing. The environment
+    variable SPYDER_TEST_REMOTE_CLIENT is 'true' in conftest.py.
+    """
+    return bool(os.environ.get("SPYDER_TEST_REMOTE_CLIENT") == "true")
+
+
 def running_in_ci():
     """Return True if currently running under CI."""
     return bool(os.environ.get('CI'))
@@ -67,6 +80,19 @@ def running_in_ci():
 def running_in_ci_with_conda():
     """Return True if currently running under CI with conda packages."""
     return running_in_ci() and os.environ.get('USE_CONDA', None) == 'true'
+
+
+def running_in_binder():
+    """Return True if currently running in Binder."""
+    return (
+        bool(os.environ.get("BINDER_REPO_URL"))
+        and "spyder-ide/binder-environments" in os.environ["BINDER_REPO_URL"]
+    )
+
+
+def building_autodoc():
+    """Return True if executing under Sphinx Autodoc, False otherwise."""
+    return bool(os.environ.get('SPHINX_AUTODOC'))
 
 
 def is_stable_version(version):
@@ -351,20 +377,24 @@ DEFAULT_LANGUAGE = 'en'
 # This needs to be updated every time a new language is added to spyder, and is
 # used by the Preferences configuration to populate the Language QComboBox
 LANGUAGE_CODES = {
-    'en': u'English',
-    'fr': u'Français',
-    'es': u'Español',
-    'hu': u'Magyar',
-    'pt_BR': u'Português',
-    'ru': u'Русский',
-    'zh_CN': u'简体中文',
-    'ja': u'日本語',
-    'de': u'Deutsch',
-    'pl': u'Polski'
+    'en': 'English',
+    'fr': 'Français',
+    'es': 'Español',
+    'hu': 'Magyar',
+    'pt_BR': 'Português',
+    'ru': 'Русский',
+    'zh_CN': '简体中文',
+    'ja': '日本語',
+    'de': 'Deutsch',
+    'pl': 'Polski',
+    'fa': 'Persian',
+    'hr': 'Croatian',
+    'te': 'Telugu',
+    'uk': 'Ukrainian',
 }
 
 # Disabled languages because their translations are outdated or incomplete
-DISABLED_LANGUAGES = ['hu', 'pl']
+DISABLED_LANGUAGES = ['fa', 'hr', 'hu', 'pl', 'te', 'uk', 'ru']
 
 
 def get_available_translations():
@@ -385,14 +415,19 @@ def get_available_translations():
 
     # Check that there is a language code available in case a new translation
     # is added, to ensure LANGUAGE_CODES is updated.
+    retlangs = []
     for lang in langs:
         if lang not in LANGUAGE_CODES:
             if DEV:
                 error = ('Update LANGUAGE_CODES (inside config/base.py) if a '
-                         'new translation has been added to Spyder')
+                         'new translation has been added to Spyder. '
+                         'Currently missing ' + lang)
                 print(error)  # spyder: test-skip
-            return ['en']
-    return langs
+                return ['en']
+        else:
+            retlangs.append(lang)
+
+    return retlangs
 
 
 def get_interface_language():
@@ -402,18 +437,31 @@ def get_interface_language():
     otherwise it will return DEFAULT_LANGUAGE.
 
     Example:
-    1.) Spyder provides ('en',  'de', 'fr', 'es' 'hu' and 'pt_BR'), if the
+    1.) Spyder provides ('en', 'de', 'fr', 'es' 'hu' and 'pt_BR'), if the
     locale is either 'en_US' or 'en' or 'en_UK', this function will return 'en'
 
-    2.) Spyder provides ('en',  'de', 'fr', 'es' 'hu' and 'pt_BR'), if the
+    2.) Spyder provides ('en', 'de', 'fr', 'es' 'hu' and 'pt_BR'), if the
     locale is either 'pt' or 'pt_BR', this function will return 'pt_BR'
     """
 
-    # Solves spyder-ide/spyder#3627.
-    try:
-        locale_language = locale.getdefaultlocale()[0]
-    except ValueError:
-        locale_language = DEFAULT_LANGUAGE
+    if os.name == "nt":
+        # Changing to locale.getlocale from locale.getdefaultlocale caused some
+        # Windows machines to return non BCP47 locale codes. Instead use
+        # win32 GetUserDefaultLocaleName which does seem to give BCP47 locale.
+        # Fixes spyder-ide/spyder#23318.
+        from ctypes import create_unicode_buffer, windll
+        bufsize = 85  # LOCALE_NAME_MAX_LENGTH
+        buf = create_unicode_buffer(bufsize)
+        if windll.kernel32.GetUserDefaultLocaleName(buf, bufsize):
+            locale_language = buf.value
+        else:
+            locale_language = DEFAULT_LANGUAGE
+    else:
+        # Fixes spyder-ide/spyder#3627.
+        try:
+            locale_language = locale.getlocale()[0]
+        except ValueError:
+            locale_language = DEFAULT_LANGUAGE
 
     # Tests expect English as the interface language
     if running_under_pytest():
@@ -468,27 +516,64 @@ def load_lang_conf():
     return lang
 
 
-def get_translation(modname, dirname=None):
-    """Return translation callback for module *modname*"""
+def get_translation(
+    modname: str, dirname: str | None = None
+) -> Callable[[str], str]:
+    """
+    Return the translation callback for module ``modname``.
+
+    Parameters
+    ----------
+    modname : str
+        The module to get the translation callback for.
+    dirname : str | None, optional
+        The directory name of the module, same as the module name by default.
+
+    Returns
+    -------
+    Callable[[str], str]
+        The gettext translation callback for the given module.
+    """
     if dirname is None:
         dirname = modname
 
-    def translate_dumb(x):
+    def translate_dumb(x: str) -> str:
         """Dumb function to not use translations."""
         return x
 
-    locale_path = get_module_data_path(dirname, relpath="locale",
-                                       attr_name='LOCALEPATH')
+    if building_autodoc():
+
+        def translate_gettext(x: str) -> str:
+            """
+            Translate a text string to the current language for a module.
+
+            Parameters
+            ----------
+            x : str
+                The string to translate.
+
+            Returns
+            -------
+            str
+                The translated string.
+            """
+            return x
+
+        return translate_gettext
+
+    locale_path = get_module_data_path(
+        dirname, relpath="locale", attr_name="LOCALEPATH"
+    )
 
     # If LANG is defined in Ubuntu, a warning message is displayed,
     # so in Unix systems we define the LANGUAGE variable.
     language = load_lang_conf()
-    if os.name == 'nt':
+    if os.name == "nt":
         # Trying to set LANG on Windows can fail when Spyder is
         # run with admin privileges.
         # Fixes spyder-ide/spyder#6886.
         try:
-            os.environ["LANG"] = language      # Works on Windows
+            os.environ["LANG"] = language  # Works on Windows
         except Exception:
             return translate_dumb
     else:
@@ -498,18 +583,33 @@ def get_translation(modname, dirname=None):
         return translate_dumb
 
     import gettext
+
     try:
         _trans = gettext.translation(modname, locale_path)
 
-        def translate_gettext(x):
+        def translate_gettext(x: str) -> str:
+            """
+            Translate a text string to the current language for a module.
+
+            Parameters
+            ----------
+            x : str
+                The string to translate.
+
+            Returns
+            -------
+            str
+                The translated string.
+            """
             return _trans.gettext(x)
+
         return translate_gettext
     except Exception as exc:
         # logging module is not yet initialised at this point
         print(
             f"Could not load translations for {language} due to: "
             f"{exc.__class__.__name__} - {exc}",
-            file=sys.stderr
+            file=sys.stderr,
         )
         return translate_dumb
 
@@ -537,18 +637,28 @@ EXCLUDED_NAMES = ['nan', 'inf', 'infty', 'little_endian', 'colorbar_doc',
 def is_conda_based_app(pyexec=sys.executable):
     """
     Check if Spyder is running from the conda-based installer by looking for
-    the `spyder-menu.json` file.
+    the `conda_based_app` file.
 
     If a Python executable is provided, checks if it is in a conda-based
     installer environment or the root environment thereof.
     """
     real_pyexec = osp.realpath(pyexec)  # pyexec may be symlink
+
+    # It seems in some cases the check below detects that a regular conda env
+    # corresponds to our installer. This makes things a bit more strict by
+    # also validating the env name where Spyder is installed.
+    # Fixes spyder-ide/spyder#25549.
+    if not "spyder-runtime" in real_pyexec:
+        return False
+
+    # Check the presence of conda-based-app file, which is added when creating
+    # the installers.
     if os.name == 'nt':
         env_path = osp.dirname(real_pyexec)
     else:
         env_path = osp.dirname(osp.dirname(real_pyexec))
 
-    menu_rel_path = '/Menu/spyder-menu.json'
+    menu_rel_path = '/Menu/conda-based-app'
     if (
         osp.exists(env_path + menu_rel_path)
         or glob(env_path + '/envs/*' + menu_rel_path)
@@ -556,6 +666,20 @@ def is_conda_based_app(pyexec=sys.executable):
         return True
     else:
         return False
+
+
+def is_installed_all_users():
+    """
+    Check if conda-based installer is installed for all users.
+    Only for conda-based installers.
+    """
+    real_pyexec = osp.realpath(sys.executable)  # may be symlink
+
+    if not is_conda_based_app(real_pyexec):
+        return False
+
+    root = real_pyexec.split("envs")[0]
+    return not osp.exists(root + ".nonadmin")
 
 
 #==============================================================================

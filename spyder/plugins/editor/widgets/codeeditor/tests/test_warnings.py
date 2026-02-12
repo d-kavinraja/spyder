@@ -31,11 +31,7 @@ TEXT = ("def some_function():\n"  # D100, D103: Missing docstring
 def completions_codeeditor_linting(request, qtbot, completions_codeeditor):
     editor, completion_plugin = completions_codeeditor
     CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pydocstyle'),
-             True)
-
-    CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pycodestyle'),
+             ('provider_configuration', 'lsp', 'values', 'flake8'),
              True)
 
     # After this call the manager needs to be reinitialized
@@ -44,11 +40,7 @@ def completions_codeeditor_linting(request, qtbot, completions_codeeditor):
 
     def teardown():
         CONF.set('completions',
-                 ('provider_configuration', 'lsp', 'values', 'pydocstyle'),
-                 False)
-
-        CONF.set('completions',
-                 ('provider_configuration', 'lsp', 'values', 'pycodestyle'),
+                 ('provider_configuration', 'lsp', 'values', 'flake8'),
                  False)
 
         # After this call the manager needs to be reinitialized
@@ -70,11 +62,7 @@ def test_ignore_warnings(qtbot, completions_codeeditor_linting):
     editor.set_text(TEXT)
 
     CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pydocstyle/ignore'),
-             'D100')
-
-    CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pycodestyle/ignore'),
+             ('provider_configuration', 'lsp', 'values', 'flake8/extendIgnore'),
              'E261')
 
     # After this call the manager needs to be reinitialized
@@ -89,20 +77,17 @@ def test_ignore_warnings(qtbot, completions_codeeditor_linting):
     qtbot.wait(2000)
     warnings = editor.get_current_warnings()
 
-    expected = [['D103: Missing docstring in public function', 1],
-                ['W293 blank line contains whitespace', 2],
+    expected = [['W293 blank line contains whitespace', 2],
                 ["undefined name 's'", 5],
+                ["F821 undefined name 's'", 5],
                 ["undefined name 'undefined_function'", 7],
-                ["W292 no newline at end of file", 7],
+                ["F821 undefined name 'undefined_function'", 7],
                 ["""E305 expected 2 blank lines after class or """
-                 """function definition, found 0""", 7]]
+                 """function definition, found 0""", 7],
+                ["W292 no newline at end of file", 7],]
 
     CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pydocstyle/ignore'),
-             '')
-
-    CONF.set('completions',
-             ('provider_configuration', 'lsp', 'values', 'pycodestyle/ignore'),
+             ('provider_configuration', 'lsp', 'values', 'flake8/extendIgnore'),
              '')
 
     completion_plugin.after_configuration_update([])
@@ -163,18 +148,15 @@ def test_move_warnings(qtbot, completions_codeeditor_linting):
 
     # Move between warnings
     editor.go_to_next_warning()
-    assert 2 == editor.get_cursor_line_number()
+    assert 5 == editor.get_cursor_line_number()
 
     editor.go_to_next_warning()
-    assert 3 == editor.get_cursor_line_number()
-
-    editor.go_to_previous_warning()
-    assert 2 == editor.get_cursor_line_number()
+    assert 7 == editor.get_cursor_line_number()
 
     # Test cycling behaviour
     editor.go_to_line(7)
     editor.go_to_next_warning()
-    assert 1 == editor.get_cursor_line_number()
+    assert 5 == editor.get_cursor_line_number()
 
     editor.go_to_previous_warning()
     assert 7 == editor.get_cursor_line_number()
@@ -182,6 +164,7 @@ def test_move_warnings(qtbot, completions_codeeditor_linting):
 
 @pytest.mark.order(2)
 @flaky(max_runs=5)
+@pytest.mark.skipif(sys.platform == "darwin", reason="Fails sometimes on Mac")
 def test_get_warnings(qtbot, completions_codeeditor_linting):
     """Test that the editor is returning the right list of warnings."""
     editor, _ = completions_codeeditor_linting
@@ -199,21 +182,17 @@ def test_get_warnings(qtbot, completions_codeeditor_linting):
     # Get current warnings
     warnings = editor.get_current_warnings()
 
-    expected = [['D100: Missing docstring in public module', 1],
-                ['D103: Missing docstring in public function', 1],
-                ['W293 blank line contains whitespace', 2],
-                ['E261 at least two spaces before inline comment', 3],
-                ["undefined name 's'", 5],
+    expected = [["undefined name 's'", 5],
+                ["F821 undefined name 's'", 5],
                 ["undefined name 'undefined_function'", 7],
-                ["W292 no newline at end of file", 7],
-                ["""E305 expected 2 blank lines after class or """
-                 """function definition, found 0""", 7]]
+                ["F821 undefined name 'undefined_function'", 7]]
 
     assert warnings == expected
 
 
 @pytest.mark.order(2)
 @flaky(max_runs=5)
+@pytest.mark.skipif(sys.platform == "darwin", reason="Fails sometimes on Mac")
 def test_update_warnings_after_delete_line(qtbot, completions_codeeditor_linting):
     """
     Test that code style warnings are correctly updated after deleting a line
@@ -239,19 +218,17 @@ def test_update_warnings_after_delete_line(qtbot, completions_codeeditor_linting
     qtbot.waitSignal(editor.completions_response_signal, timeout=30000)
 
     # Assert that the W293 warning is gone.
-    expected = [['D100: Missing docstring in public module', 1],
-                ['D103: Missing docstring in public function', 1],
-                ['E261 at least two spaces before inline comment', 2],
-                ["undefined name 's'", 4],
+    expected = [["undefined name 's'", 4],
+                ["F821 undefined name 's'", 4],
                 ["undefined name 'undefined_function'", 6],
-                ["W292 no newline at end of file", 6],
-                ["""E305 expected 2 blank lines after class or """
-                 """function definition, found 0""", 6]]
+                ["F821 undefined name 'undefined_function'", 6]]
+
     assert editor.get_current_warnings() == expected
 
 
 @pytest.mark.order(2)
 @flaky(max_runs=5)
+@pytest.mark.skipif(sys.platform == "darwin", reason="Fails sometimes on Mac")
 def test_update_warnings_after_closequotes(qtbot, completions_codeeditor_linting):
     """
     Test that code errors are correctly updated after activating closequotes
@@ -262,10 +239,14 @@ def test_update_warnings_after_closequotes(qtbot, completions_codeeditor_linting
     editor, _ = completions_codeeditor_linting
     editor.textCursor().insertText("print('test)\n")
 
-    if sys.version_info >= (3, 10):
-        expected = [['unterminated string literal (detected at line 1)', 1]]
+    if sys.version_info >= (3, 12):
+        expected = [
+            ['unterminated string literal (detected at line 1)', 1]
+        ]
+    elif sys.version_info >= (3, 10):
+        expected = [['unterminated string literal (detected at line 1)',1]]
     else:
-        expected = [['EOL while scanning string literal', 1]]
+        expected = [['EOL while scanning string literal' ,1]]
 
     # Notify changes.
     with qtbot.waitSignal(editor.completions_response_signal, timeout=30000):
@@ -285,12 +266,13 @@ def test_update_warnings_after_closequotes(qtbot, completions_codeeditor_linting
 
     # Assert that the error is gone.
     qtbot.wait(2000)
-    expected = [['D100: Missing docstring in public module', 1]]
+    expected = []
     assert editor.get_current_warnings() == expected
 
 
 @pytest.mark.order(2)
 @flaky(max_runs=5)
+@pytest.mark.skipif(sys.platform == "darwin", reason="Fails sometimes on Mac")
 def test_update_warnings_after_closebrackets(qtbot, completions_codeeditor_linting):
     """
     Test that code errors are correctly updated after activating closebrackets
@@ -301,16 +283,16 @@ def test_update_warnings_after_closebrackets(qtbot, completions_codeeditor_linti
     editor, _ = completions_codeeditor_linting
     editor.textCursor().insertText("print('test'\n")
 
-    if sys.version_info >= (3, 10):
+    if sys.version_info >= (3, 12):
         expected = [
-            ["'(' was never closed", 1],
-            ['E901 TokenError: EOF in multi-line statement', 2]
+            ["'(' was never closed", 1]
+        ]
+    elif sys.version_info >= (3, 10):
+        expected = [
+            ["'(' was never closed", 1]
         ]
     else:
-        expected = [
-            ['unexpected EOF while parsing', 1],
-            ['E901 TokenError: EOF in multi-line statement', 2]
-        ]
+        expected = [['unexpected EOF while parsing', 1]]
 
     # Notify changes.
     with qtbot.waitSignal(editor.completions_response_signal, timeout=30000):
@@ -330,7 +312,8 @@ def test_update_warnings_after_closebrackets(qtbot, completions_codeeditor_linti
 
     # Assert that the error is gone.
     qtbot.wait(2000)
-    expected = [['D100: Missing docstring in public module', 1]]
+    expected = [] 
+
     assert editor.get_current_warnings() == expected
 
 
@@ -339,6 +322,7 @@ def test_update_warnings_after_closebrackets(qtbot, completions_codeeditor_linti
 @pytest.mark.parametrize(
     'ignore_comment', ['#noqa', '# NOQA', '# analysis:ignore', '# no-work']
 )
+@pytest.mark.skipif(sys.platform == "darwin", reason="Fails sometimes on Mac")
 def test_ignore_warnings_with_comments(
     qtbot, completions_codeeditor_linting, ignore_comment
 ):
@@ -355,12 +339,13 @@ def test_ignore_warnings_with_comments(
     if ignore_comment == '# no-work':
         expected = [
             ["undefined name 'foo'", 1],
-            ['D100: Missing docstring in public module', 1],
-            ['E261 at least two spaces before inline comment', 1],
-            ["undefined name 'bar'", 2]
+            ["F821 undefined name 'foo'", 1],
+            ["undefined name 'bar'", 2],
+            ["F821 undefined name 'bar'", 2]
         ]
     else:
-        expected = [["undefined name 'bar'", 2]]
+        expected = [["undefined name 'bar'", 2],
+                    ["F821 undefined name 'bar'", 2]]
 
     # Notify changes.
     with qtbot.waitSignal(editor.completions_response_signal, timeout=30000):

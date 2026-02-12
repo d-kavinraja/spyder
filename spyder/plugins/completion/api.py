@@ -16,6 +16,7 @@ https://microsoft.github.io/language-server-protocol/specifications/specificatio
 from typing import Any, Optional, Tuple, Union
 
 # Third party imports
+from qtpy import PYSIDE6
 from qtpy.QtCore import Signal, QObject, Slot, Qt
 
 # Local imports
@@ -675,6 +676,13 @@ class CompletionConfigurationObserver(SpyderConfigurationObserver):
     def _gather_observers(self):
         """Gather all the methods decorated with `on_conf_change`."""
         for method_name in dir(self):
+            # Avoid crash at startup due to MRO
+            if PYSIDE6 and method_name in {
+                # Method is debounced
+                "interpreter_changed"
+            }:
+                continue
+
             method = getattr(self, method_name, None)
             if hasattr(method, '_conf_listen'):
                 info = method._conf_listen
@@ -1059,23 +1067,23 @@ class SpyderCompletionProvider(QObject, CompletionConfigurationObserver):
         """
         pass
 
-    @Slot(object, object)
-    def python_path_update(self, previous_path, new_path):
+    @Slot(object, bool)
+    def python_path_update(self, new_path, prioritize):
         """
         Handle Python path updates on Spyder.
 
         Parameters
         ----------
-        previous_path: Dict
-            Dictionary containing the previous Python path values.
-        new_path: Dict
+        new_path: list of str
             Dictionary containing the current Python path values.
+        prioritize: bool
+            Whether to prioritize Python path values in sys.path
         """
         pass
 
-    @Slot()
-    def main_interpreter_changed(self):
-        """Handle changes on the main Python interpreter of Spyder."""
+    @Slot(str)
+    def interpreter_changed(self, interpreter):
+        """Handle changes to the Python interpreter used for completions."""
         pass
 
     def file_opened_closed_or_updated(self, filename: str, language: str):
@@ -1316,7 +1324,7 @@ class SpyderCompletionProvider(QObject, CompletionConfigurationObserver):
         """
         return self.main.get_action(name, context=context, plugin=plugin)
 
-    def create_application_menu(self, menu_id, title, dynamic=True):
+    def create_application_menu(self, menu_id, title):
         """
         Create a Spyder application menu.
 
@@ -1327,7 +1335,7 @@ class SpyderCompletionProvider(QObject, CompletionConfigurationObserver):
         title: str
             The localized menu title to be displayed.
         """
-        self.main.create_application_menu(menu_id, title, dynamic=dynamic)
+        self.main.create_application_menu(menu_id, title)
 
     def create_menu(self, name, text=None, icon=None):
         """
@@ -1347,7 +1355,7 @@ class SpyderCompletionProvider(QObject, CompletionConfigurationObserver):
         """
         self.main.create_menu(name, text=text, icon=icon)
 
-    def get_menu(name, context: Optional[str] = None,
+    def get_menu(self, name, context: Optional[str] = None,
                  plugin: Optional[str] = None):
         """Retrieve a menu by its id."""
         if context is None and plugin is None:

@@ -7,8 +7,11 @@ import logging
 import os
 import pathlib
 import re
+import subprocess
+import sys
 import threading
-from typing import List, Optional
+import time
+from typing import Optional
 
 import docstring_to_markdown
 import jedi
@@ -18,7 +21,7 @@ JEDI_VERSION = jedi.__version__
 # Eol chars accepted by the LSP protocol
 # the ordering affects performance
 EOL_CHARS = ["\r\n", "\r", "\n"]
-EOL_REGEX = re.compile(f'({"|".join(EOL_CHARS)})')
+EOL_REGEX = re.compile(f"({'|'.join(EOL_CHARS)})")
 
 log = logging.getLogger(__name__)
 
@@ -55,12 +58,29 @@ def debounce(interval_s, keyed_by=None):
     return wrapper
 
 
+def throttle(seconds=1):
+    """Throttles calls to a function every `seconds` seconds."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not hasattr(wrapper, "last_call"):
+                wrapper.last_call = 0
+            if time.time() - wrapper.last_call >= seconds:
+                wrapper.last_call = time.time()
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 def find_parents(root, path, names):
     """Find files matching the given names relative to the given path.
 
     Args:
         path (str): The file path to start searching up from.
-        names (List[str]): The file/directory names to look for.
+        names (list[str]): The file/directory names to look for.
         root (str): The directory at which to stop recursing upwards.
 
     Note:
@@ -70,7 +90,7 @@ def find_parents(root, path, names):
         return []
 
     if not os.path.commonprefix((root, path)):
-        log.warning("Path %s not in %s", path, root)
+        log.warning("Path %r not in %r", path, root)
         return []
 
     # Split the relative by directory, generate all the parent directories, then check each of them.
@@ -157,8 +177,8 @@ def escape_plain_text(contents: str) -> str:
     """
     Format plain text to display nicely in environments which do not respect whitespaces.
     """
-    contents = contents.replace("\t", "\u00A0" * 4)
-    contents = contents.replace("  ", "\u00A0" * 2)
+    contents = contents.replace("\t", "\u00a0" * 4)
+    contents = contents.replace("  ", "\u00a0" * 2)
     return contents
 
 
@@ -180,7 +200,7 @@ def wrap_signature(signature):
 SERVER_SUPPORTED_MARKUP_KINDS = {"markdown", "plaintext"}
 
 
-def choose_markup_kind(client_supported_markup_kinds: List[str]):
+def choose_markup_kind(client_supported_markup_kinds: list[str]):
     """Choose a markup kind supported by both client and the server.
 
     This gives priority to the markup kinds provided earlier on the client preference list.
@@ -191,8 +211,96 @@ def choose_markup_kind(client_supported_markup_kinds: List[str]):
     return "markdown"
 
 
+class Formatter:
+    command: list[str]
+
+    @property
+    def is_installed(self) -> bool:
+        """Returns whether formatter is available"""
+        if not hasattr(self, "_is_installed"):
+            self._is_installed = self._is_available_via_cli()
+        return self._is_installed
+
+    def format(self, code: str, line_length: int) -> str:
+        """Formats code"""
+        return subprocess.check_output(
+            [
+                sys.executable,
+                "-m",
+                *self.command,
+                "--line-length",
+                str(line_length),
+                "-",
+            ],
+            input=code,
+            text=True,
+        ).strip()
+
+    def _is_available_via_cli(self) -> bool:
+        try:
+            subprocess.check_output(
+                [
+                    sys.executable,
+                    "-m",
+                    *self.command,
+                    "--help",
+                ],
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+
+class RuffFormatter(Formatter):
+    command = ["ruff", "format"]
+
+
+class BlackFormatter(Formatter):
+    command = ["black"]
+
+
+formatters = {"ruff": RuffFormatter(), "black": BlackFormatter()}
+
+
+def format_signature(signature: str, config: dict, signature_formatter: str) -> str:
+    """Formats signature using ruff or black if either is available."""
+    as_func = f"def {signature.strip()}:\n    pass"
+    line_length = config.get("line_length", 88)
+    formatter = formatters[signature_formatter]
+    if formatter.is_installed:
+        try:
+            return (
+                formatter.format(as_func, line_length=line_length)
+                .removeprefix("def ")
+                .removesuffix(":\n    pass")
+            )
+        except subprocess.CalledProcessError as e:
+            log.warning("Signature formatter failed %s", e)
+    else:
+        log.warning(
+            "Formatter %s was requested but it does not appear to be installed",
+            signature_formatter,
+        )
+    return signature
+
+
+def convert_signatures_to_markdown(signatures: list[str], config: dict) -> str:
+    signature_formatter = config.get("formatter", "black")
+    if signature_formatter:
+        signatures = [
+            format_signature(
+                signature, signature_formatter=signature_formatter, config=config
+            )
+            for signature in signatures
+        ]
+    return wrap_signature("\n".join(signatures))
+
+
 def format_docstring(
-    contents: str, markup_kind: str, signatures: Optional[List[str]] = None
+    contents: str,
+    markup_kind: str,
+    signatures: Optional[list[str]] = None,
+    signature_config: Optional[dict] = None,
 ):
     """Transform the provided docstring into a MarkupContent object.
 
@@ -207,15 +315,24 @@ def format_docstring(
         contents = ""
 
     if markup_kind == "markdown":
-        try:
-            value = docstring_to_markdown.convert(contents)
-            return {"kind": "markdown", "value": value}
-        except docstring_to_markdown.UnknownFormatError:
-            # try to escape the Markdown syntax instead:
-            value = escape_markdown(contents)
+        wrapped_signatures = convert_signatures_to_markdown(
+            signatures if signatures is not None else [], config=signature_config or {}
+        )
 
-        if signatures:
-            value = wrap_signature("\n".join(signatures)) + "\n\n" + value
+        if contents != "":
+            try:
+                value = docstring_to_markdown.convert(contents)
+            except docstring_to_markdown.UnknownFormatError:
+                # try to escape the Markdown syntax instead:
+                value = escape_markdown(contents)
+
+            if signatures:
+                value = wrapped_signatures + "\n\n" + value
+        else:
+            value = contents
+
+            if signatures:
+                value = wrapped_signatures
 
         return {"kind": "markdown", "value": value}
     value = contents

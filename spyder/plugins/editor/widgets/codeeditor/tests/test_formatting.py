@@ -6,15 +6,9 @@
 
 """Tests for code formatting using CodeEditor instances."""
 
-# Standard library imports
-import random
-
 # Third party imports
-from flaky import flaky
 import pytest
-from qtpy.QtCore import Qt
 from qtpy.QtGui import QTextCursor
-from qtpy.QtWidgets import QMessageBox
 
 # Local imports
 from spyder.config.manager import CONF
@@ -139,7 +133,7 @@ def test_max_line_length(formatter, completions_codeeditor, qtbot):
     CONF.set(
         'completions',
         ('provider_configuration', 'lsp', 'values',
-         'pycodestyle/max_line_length'),
+         'flake8/max_line_length'),
         max_line_length
     )
     completion_plugin.after_configuration_update([])

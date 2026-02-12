@@ -23,7 +23,7 @@ from spyder.utils.pyenv import get_list_pyenv_envs
 
 
 # Get envs to show them in the Main interpreter page. This is actually
-# done in a thread in the InterpreterStatus widget.
+# done in a thread in the MainInterpreter container.
 # We're also recording the time needed to get them to compare it with the
 # loading time of that config page.
 t0 = time.time()
@@ -46,7 +46,7 @@ def test_load_time(qtbot):
 
     # Create page and measure time to do it
     t0 = time.time()
-    preferences.open_dialog(None)
+    preferences.open_dialog()
     load_time = time.time() - t0
 
     container = preferences.get_container()

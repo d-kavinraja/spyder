@@ -12,16 +12,16 @@ import sys
 
 # Third party imports
 from qtpy.QtCore import QBuffer, QByteArray
-from qtpy.QtGui import QColor, QIcon, QImage, QPainter
+from qtpy.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from qtpy.QtWidgets import QStyle, QWidget
 
 # Local imports
 from spyder.config.manager import CONF
+from spyder.config.utils import EDIT_EXTENSIONS
 from spyder.utils.image_path_manager import get_image_path
-from spyder.utils.encoding import is_text_file
-from spyder.utils.palette import QStylePalette, SpyderPalette
+from spyder.utils.palette import SpyderPalette
+from spyder.utils.svg_colorizer import SVGColorize
 import qtawesome as qta
-
 
 class IconManager():
     """Class that manages all the icons."""
@@ -49,8 +49,7 @@ class IconManager():
 
         self.ICONS_BY_EXTENSION = {}
 
-        # Magnification factors for attribute icons
-        # per platform
+        # Magnification factors for attribute icons per platform
         if sys.platform.startswith('linux'):
             self.BIG_ATTR_FACTOR = 1.0
             self.SMALL_ATTR_FACTOR = 0.9
@@ -108,6 +107,26 @@ class IconManager():
             'loaded': False,
         }
 
+        self.ICON_COLORS = {
+            'ICON_1':            SpyderPalette.ICON_1,
+            'ICON_2':            SpyderPalette.ICON_2,
+            'ICON_3':            SpyderPalette.ICON_3,
+            'ICON_4':            SpyderPalette.ICON_4,
+            'ICON_5':            SpyderPalette.ICON_5,
+            'ICON_6':            SpyderPalette.ICON_6,
+            'ICON_7':            SpyderPalette.ICON_7,
+            'SPYDER_LOGO_WEB':   SpyderPalette.SPYDER_LOGO_WEB,
+            'SPYDER_LOGO_SNAKE': SpyderPalette.SPYDER_LOGO_SNAKE,
+            # Connection status colors
+            'active':            SpyderPalette.COLOR_SUCCESS_3,
+            'inactive':          SpyderPalette.COLOR_OCCURRENCE_5,
+            'error':             SpyderPalette.COLOR_ERROR_2,
+            'connecting':        SpyderPalette.COLOR_WARN_4,
+        }
+
+        # Cache for processed icons
+        self._icon_cache = {}
+
         self._qtaargs = {
             'environment':             [('mdi.cube-outline',), {'color': self.MAIN_FG_COLOR}],
             'drag_dock_widget':        [('mdi.drag-variant',), {'color': self.MAIN_FG_COLOR}],
@@ -143,12 +162,11 @@ class IconManager():
             'arrow-step-in':           [('mdi.debug-step-into',), {'color': SpyderPalette.ICON_2}],
             'arrow-step-out':          [('mdi.debug-step-out',), {'color': SpyderPalette.ICON_2}],
             'stop_debug':              [('mdi.stop',), {'color': SpyderPalette.ICON_2}],
-            'enter_debug':             [('mdi.location-enter',), {'color': SpyderPalette.ICON_2}],
             'run':                     [('mdi.play',), {'color': SpyderPalette.ICON_3}],
             'todo_list':               [('mdi.check-bold',), {'color': self.MAIN_FG_COLOR}],
-            'wng_list':                [('mdi.alert',), {'options': [{'color': SpyderPalette.COLOR_WARN_2, 'color_disabled': QStylePalette.COLOR_TEXT_4}]}],
-            'prev_wng':                [('mdi.arrow-left',), {'options': [{'color': SpyderPalette.ICON_1, 'color_disabled': QStylePalette.COLOR_TEXT_4}]}],
-            'next_wng':                [('mdi.arrow-right',), {'options': [{'color': SpyderPalette.ICON_1, 'color_disabled': QStylePalette.COLOR_TEXT_4}]}],
+            'wng_list':                [('mdi.alert',), {'options': [{'color': SpyderPalette.COLOR_WARN_2, 'color_disabled': SpyderPalette.COLOR_TEXT_4}]}],
+            'prev_wng':                [('mdi.arrow-left',), {'options': [{'color': SpyderPalette.ICON_1, 'color_disabled': SpyderPalette.COLOR_TEXT_4}]}],
+            'next_wng':                [('mdi.arrow-right',), {'options': [{'color': SpyderPalette.ICON_1, 'color_disabled': SpyderPalette.COLOR_TEXT_4}]}],
             'prev_cursor':             [('mdi.hand-pointing-left',), {'color': self.MAIN_FG_COLOR}],
             'next_cursor':             [('mdi.hand-pointing-right',), {'color': self.MAIN_FG_COLOR}],
             'comment':                 [('mdi.comment-text-outline',), {'color': self.MAIN_FG_COLOR}],
@@ -168,7 +186,10 @@ class IconManager():
             'findf':                   [('mdi.file-find-outline',), {'color': self.MAIN_FG_COLOR}],
             'history':                 [('mdi.history',), {'color': self.MAIN_FG_COLOR}],
             'files':                   [('mdi.file-multiple',), {'color': self.MAIN_FG_COLOR}],
-            'help_gray':               [('mdi.help-circle-outline',), {'color': SpyderPalette.COLOR_OCCURRENCE_4}],            
+            'question_tip':            [('mdi.help-circle-outline',), {'color': SpyderPalette.COLOR_BACKGROUND_6}],
+            'question_tip_hover':      [('mdi.help-circle-outline',), {'color': SpyderPalette.COLOR_TEXT_4}],
+            'info_tip':                [('mdi.information-outline',), {'color': SpyderPalette.COLOR_BACKGROUND_6}],
+            'info_tip_hover':          [('mdi.information-outline',), {'color': SpyderPalette.COLOR_TEXT_4}],
             'help':                    [('mdi.help-circle',), {'color': self.MAIN_FG_COLOR}],
             'online_help':             [('mdi.help-rhombus-outline',), {'color': self.MAIN_FG_COLOR}],
             'lock':                    [('mdi.lock',), {'color': self.MAIN_FG_COLOR}],
@@ -188,6 +209,7 @@ class IconManager():
             'redo':                    [('mdi.redo',), {'color': self.MAIN_FG_COLOR}],
             'refresh':                 [('mdi.refresh',), {'color': self.MAIN_FG_COLOR}],
             'restart':                 [('mdi.reload',), {'color': self.MAIN_FG_COLOR}],
+            'reconnect':               [('mdi6.connection',), {'color': self.MAIN_FG_COLOR, 'scale_factor': 1.1}],
             'editcopy':                [('mdi.content-copy',), {'color': self.MAIN_FG_COLOR}],
             'editcut':                 [('mdi.content-cut',), {'color': self.MAIN_FG_COLOR}],
             'editclear':               [('mdi.delete',), {'color': self.MAIN_FG_COLOR}],
@@ -202,17 +224,30 @@ class IconManager():
             'home':                    [('mdi.home',), {'color': self.MAIN_FG_COLOR}],
             'show':                    [('mdi.eye',), {'color': self.MAIN_FG_COLOR}],
             'plot':                    [('mdi.chart-bar',), {'color': self.MAIN_FG_COLOR}],
+            'plot.fit_to_pane':        [('mdi6.fit-to-screen',), {'color': self.MAIN_FG_COLOR}],
             'hist':                    [('mdi.chart-histogram',), {'color': self.MAIN_FG_COLOR}],
             'imshow':                  [('mdi.image',), {'color': self.MAIN_FG_COLOR}],
             'insert':                  [('mdi.login',), {'color': self.MAIN_FG_COLOR}],
             'insert_above':            [('mdi.table-arrow-up',), {'color': self.MAIN_FG_COLOR}],
             'insert_below':            [('mdi.table-arrow-down',), {'color': self.MAIN_FG_COLOR}],
+            'insert_after':            [('mdi.table-arrow-right',), {'color': self.MAIN_FG_COLOR}],
+            'insert_before':           [('mdi.table-arrow-left',), {'color': self.MAIN_FG_COLOR}],
             'rename':                  [('mdi.rename-box',), {'color': self.MAIN_FG_COLOR}],
             'move':                    [('mdi.file-move',), {'color': self.MAIN_FG_COLOR}],
             'edit_add':                [('mdi.plus-box',), {'color': self.MAIN_FG_COLOR}],
+            'select_row':              [('mdi.plus-box-outline',), {'color': self.MAIN_FG_COLOR}],
+            'deselect_row':            [('mdi.minus-box-outline',), {'color': self.MAIN_FG_COLOR}],
+            'duplicate_row':           [('ph.rows',), {'color': self.MAIN_FG_COLOR}],
+            'duplicate_column':        [('ph.columns',), {'color': self.MAIN_FG_COLOR}],
             'collapse_column':         [('mdi.arrow-collapse-horizontal',), {'color': self.MAIN_FG_COLOR}],
             'collapse_row':            [('mdi.arrow-collapse-vertical',), {'color': self.MAIN_FG_COLOR}],
-            'edit_remove':             [('mdi.minus',), {'color': self.MAIN_FG_COLOR}],
+            'delete_row':              [('mdi.table-row-remove',), {'color': self.MAIN_FG_COLOR}],
+            'delete_column':           [('mdi.table-column-remove',), {'color': self.MAIN_FG_COLOR}],
+            # Although this icon is not used in Spyder, it can be in other plugins
+            # because it's the opposite of edit_add. So, don't remove it.
+            'edit_remove':             [('mdi.minus-box',), {'color': self.MAIN_FG_COLOR}],
+            'format_float':            [('mdi.decimal-increase',), {'color': self.MAIN_FG_COLOR}],
+            'background_color':        [('mdi.format-color-fill',), {'color': self.MAIN_FG_COLOR}],
             'browse_tab':              [('mdi.tab',), {'color': self.MAIN_FG_COLOR}],
             'filelist':                [('mdi.view-list',), {'color': self.MAIN_FG_COLOR}],
             'newwindow':               [('mdi.window-maximize',), {'color': self.MAIN_FG_COLOR}],
@@ -235,9 +270,10 @@ class IconManager():
             'DirClosedIcon':           [('mdi.folder',), {'color': self.MAIN_FG_COLOR}],
             'DialogHelpButton':        [('mdi.lifebuoy',), {'color': self.MAIN_FG_COLOR}],
             'VideoIcon':               [('mdi.video',), {'color': self.MAIN_FG_COLOR}],
-            'MessageBoxInformation':   [('mdi.information',), {'color': self.MAIN_FG_COLOR}],
+            'MessageBoxInformation':   [('mdi.information-outline',), {'color': self.MAIN_FG_COLOR}],
             'DirOpenIcon':             [('mdi.folder-open',), {'color': self.MAIN_FG_COLOR}],
             'FileIcon':                [('mdi.file',), {'color': self.MAIN_FG_COLOR}],
+            'GenericFileIcon':         [('mdi.file-outline',), {'color': self.MAIN_FG_COLOR}],
             'ExcelFileIcon':           [('mdi.file-excel',), {'color': self.MAIN_FG_COLOR}],
             'WordFileIcon':            [('mdi.file-word',), {'color': self.MAIN_FG_COLOR}],
             'PowerpointFileIcon':      [('mdi.file-powerpoint',), {'color': self.MAIN_FG_COLOR}],
@@ -261,8 +297,7 @@ class IconManager():
             'MarkdownFileIcon':        [('mdi.markdown',), {'color': self.MAIN_FG_COLOR}],
             'JsonFileIcon':            [('mdi.json',), {'color': self.MAIN_FG_COLOR}],
             'ExclamationFileIcon':     [('mdi.exclamation',), {'color': self.MAIN_FG_COLOR}],
-            'CodeFileIcon':             [('mdi.xml',), {'color': self.MAIN_FG_COLOR}],
-            'project':                 [('mdi.folder-open',), {'color': self.MAIN_FG_COLOR}],
+            'CodeFileIcon':            [('mdi.xml',), {'color': self.MAIN_FG_COLOR}],
             'arrow':                   [('mdi.arrow-right-bold',), {'color': self.MAIN_FG_COLOR}],
             'collapse':                [('mdi.collapse-all',), {'color': self.MAIN_FG_COLOR}],
             'expand':                  [('mdi.expand-all',), {'color': self.MAIN_FG_COLOR}],
@@ -278,9 +313,13 @@ class IconManager():
             '1uparrow':                [('mdi.arrow-up',), {'color': self.MAIN_FG_COLOR}],
             '2downarrow':              [('mdi.arrow-collapse-down',), {'color': self.MAIN_FG_COLOR}],
             '1downarrow':              [('mdi.arrow-down',), {'color': self.MAIN_FG_COLOR}],
+            'prepend':                 [('mdi.arrow-collapse-left',), {'color': self.MAIN_FG_COLOR}],
+            'append':                  [('mdi.arrow-collapse-right',), {'color': self.MAIN_FG_COLOR}],
             'undock':                  [('mdi.open-in-new',), {'color': self.MAIN_FG_COLOR}],
             'close_pane':              [('mdi.window-close',), {'color': self.MAIN_FG_COLOR}],
             'toolbar_ext_button':      [('mdi.dots-horizontal',), {'color': self.MAIN_FG_COLOR}],
+            'inapp_appeal':            [('mdi6.heart',), {'color': SpyderPalette.COLOR_HEART}],
+            'update':                  [('mdi6.tray-arrow-down',), {'color': self.MAIN_FG_COLOR}],
             # --- Autocompletion/document symbol type icons --------------
             'completions':             [('mdi.code-tags-check',), {'color': self.MAIN_FG_COLOR}],
             'keyword':                 [('mdi.alpha-k-box',), {'color': SpyderPalette.GROUP_9, 'scale_factor': self.BIG_ATTR_FACTOR}],
@@ -330,21 +369,22 @@ class IconManager():
             'tour.previous':           [('mdi.skip-previous',), {'color': self.MAIN_FG_COLOR}],
             'tour.next':               [('mdi.skip-next',), {'color': self.MAIN_FG_COLOR}],
             'tour.end':                [('mdi.skip-forward',), {'color': self.MAIN_FG_COLOR}],
-            # --- Third party plugins ------------------------------------------------
-            'profiler':                [('mdi.timer-outline',), {'color': self.MAIN_FG_COLOR}],
-            'condapackages':           [('mdi.archive',), {'color': self.MAIN_FG_COLOR}],
+            # --- Profiler ------------------------------------------------
+            'hide':                    [('mdi.eye-off',), {'color': self.MAIN_FG_COLOR}],
+            'slow':                    [('mdi.speedometer-slow',), {'color': self.MAIN_FG_COLOR}],
+            'stop_profile':            [('mdi.stop',), {'color': SpyderPalette.ICON_7}],
+            'callers_or_callees':      [('mdi6.call-made', 'mdi6.call-received'), {'options': [{'color': self.MAIN_FG_COLOR, 'offset': (-0.2, -0.2)}, {'color': self.MAIN_FG_COLOR, 'offset': (0.2, 0.2)}]}],
+            'callers':                 [('mdi6.call-received',), {'color': self.MAIN_FG_COLOR}],
+            'callees':                 [('mdi6.call-made',), {'color': self.MAIN_FG_COLOR}],
+            # --- Other ------------------------------------------------
             'spyder.example':          [('mdi.eye',), {'color': self.MAIN_FG_COLOR}],
-            'spyder.autopep8':         [('mdi.eye',), {'color': self.MAIN_FG_COLOR}],
-            'spyder.memory_profiler':  [('mdi.eye',), {'color': self.MAIN_FG_COLOR}],
             'spyder.line_profiler':    [('mdi.eye',), {'color': self.MAIN_FG_COLOR}],
             'symbol_find':             [('mdi.at',), {'color': self.MAIN_FG_COLOR}],
-            'folding.arrow_right_off': [('mdi.menu-right',), {'color': SpyderPalette.GROUP_3}],
-            'folding.arrow_right_on':  [('mdi.menu-right',), {'color': self.MAIN_FG_COLOR}],
-            'folding.arrow_down_off':  [('mdi.menu-down',), {'color': SpyderPalette.GROUP_3}],
-            'folding.arrow_down_on':   [('mdi.menu-down',), {'color': self.MAIN_FG_COLOR}],
-            'lspserver.down':          [('mdi.close',), {'color': self.MAIN_FG_COLOR}],
+            'folding.arrow_right':     [('mdi.chevron-right',), {'color': self.MAIN_FG_COLOR}],
+            'folding.arrow_down':      [('mdi.chevron-down',), {'color': self.MAIN_FG_COLOR}],
+            'lspserver.down':          [('mdi.alert',), {'color': self.MAIN_FG_COLOR}],
             'lspserver.ready':         [('mdi.check',), {'color': self.MAIN_FG_COLOR}],
-            'dependency_ok':           [('mdi.check',), {'color': self.MAIN_FG_COLOR}],
+            'dependency_ok':           [('mdi.check',), {'color': SpyderPalette.COLOR_SUCCESS_2}],
             'dependency_warning':      [('mdi.alert',), {'color': SpyderPalette.COLOR_WARN_2}],
             'dependency_error':        [('mdi.alert',), {'color': SpyderPalette.COLOR_ERROR_1}],
             'broken_image':            [('mdi.image-broken-variant',), {'color': self.MAIN_FG_COLOR}],
@@ -365,6 +405,12 @@ class IconManager():
             'print.single_page':       [('mdi.file-document-outline',), {'color': self.MAIN_FG_COLOR}],
             'print.all_pages':         [('mdi.file-document-multiple-outline',), {'color': self.MAIN_FG_COLOR}],
             'print.page_setup':        [('mdi.ruler-square',), {'color': self.MAIN_FG_COLOR}],
+            # --- Remote connections ----------------------------------------------
+            'add_server':              [('mdi.server-plus',), {'color': self.MAIN_FG_COLOR}],
+            'remote_server':           [('mdi.server-network',), {'color': self.MAIN_FG_COLOR}],
+            # --- For our collapsed widget
+            'collapsed':               [('mdi.chevron-right',), {'color': self.MAIN_FG_COLOR, 'scale_factor': 1.3}],
+            'expanded':                [('mdi.chevron-down',), {'color': self.MAIN_FG_COLOR, 'scale_factor': 1.3}],
         }
 
     def get_std_icon(self, name, size=None):
@@ -389,10 +435,135 @@ class IconManager():
             (16, 24, 32, 48, 96, 128, 256). This is recommended for
             QMainWindow icons created from SVG images on non-Windows
             platforms due to a Qt bug. See spyder-ide/spyder#1314.
+
+        Returns
+        -------
+        QIcon
+            Icon object with the requested image.
+
+        Notes
+        -----
+        For SVG files, this method will automatically apply theme-based
+        colorization if the SVG contains elements with semantic class names
+        like 'ICON_1', 'ICON_2', 'ICON_3', etc. These classes
+        correspond to color definitions in SpyderPalette.
+
+        This allows icons to automatically adapt to the current theme's
+        color scheme, supporting both dark and light themes as well as
+        custom user themes.
         """
-        # Icon image path
+        # Check cache first
+        cache_key = f"{name}_{resample}"
+        if cache_key in self._icon_cache:
+            return self._icon_cache[cache_key]
+
+        # Get the icon's file path
         icon_path = get_image_path(name)
 
+        # Process the icon
+        if icon_path.endswith('.svg'):
+            icon = self._process_svg_icon(icon_path, resample)
+        else:
+            icon = self._process_regular_icon(icon_path, resample)
+
+        # Cache the result
+        self._icon_cache[cache_key] = icon
+        return icon
+
+    def _process_svg_icon(self, icon_path, resample):
+        """
+        Process an SVG icon with proper colorization for multi-color icons.
+
+        This method handles SVG icons with multiple colored paths, each defined
+        by a class attribute that maps to a color in ICON_COLORS. It supports
+        high DPI displays by generating icons at multiple resolutions.
+
+        Parameters
+        ----------
+        icon_path : str
+            Path to the SVG icon file
+        resample : bool
+            Whether to resample the icon for various sizes
+
+        Returns
+        -------
+        QIcon
+            A properly colored icon with support for normal, disabled and
+            selected states
+        """
+        try:
+            # Use SVGColorize to extract paths with their associated colors
+            svg_paths_data = SVGColorize.get_colored_paths(
+                icon_path, self.ICON_COLORS
+            )
+            if not svg_paths_data:
+                return self._process_regular_icon(icon_path, resample)
+
+            # Define standard icon sizes for high DPI support
+            sizes = [16, 24, 32, 48, 96, 128, 256, 512]
+            icon = QIcon()
+
+            # Extract SVG metadata
+            width = svg_paths_data.get('width', 24)
+            height = svg_paths_data.get('height', 24)
+            viewbox = svg_paths_data.get('viewbox')
+            paths = svg_paths_data.get('paths', [])
+
+            # Process each size to ensure proper scaling on all displays
+            for size in sizes:
+                # Create the base pixmap for this size using SVGColorize
+                svg_colorizer = SVGColorize(icon_path)
+                pixmap = svg_colorizer.render_colored_svg(
+                    paths, size, width, height, viewbox
+                )
+
+                # Add pixmap for normal state
+                icon.addPixmap(pixmap, QIcon.Normal)
+
+                # Create disabled version (grayed out)
+                disabled_pixmap = self._create_disabled_pixmap(pixmap)
+                icon.addPixmap(disabled_pixmap, QIcon.Disabled)
+
+                # Use normal state for selected state as well
+                icon.addPixmap(pixmap, QIcon.Selected)
+
+            return icon
+        except Exception:
+            # Any error, fall back to regular processing
+            return self._process_regular_icon(icon_path, resample)
+
+    def _create_disabled_pixmap(self, source_pixmap):
+        """
+        Create a disabled (grayed out) version of a pixmap.
+
+        Parameters
+        ----------
+        source_pixmap : QPixmap
+            Source pixmap to create disabled version from
+
+        Returns
+        -------
+        QPixmap
+            Disabled version of the pixmap
+        """
+        disabled_pixmap = QPixmap(source_pixmap.size())
+        disabled_pixmap.fill(QColor(0, 0, 0, 0))  # Transparent
+        
+        # Draw the source pixmap first
+        disabled_painter = QPainter(disabled_pixmap)
+        disabled_painter.drawPixmap(0, 0, source_pixmap)
+        
+        # Apply disabled color overlay
+        disabled_painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        disabled_painter.fillRect(
+            disabled_pixmap.rect(), QColor(SpyderPalette.COLOR_DISABLED)
+        )
+        disabled_painter.end()
+        
+        return disabled_pixmap
+
+    def _process_regular_icon(self, icon_path, resample):
+        """Process a regular (non-SVG) icon."""
         # This is used to wrap the image into a QIcon container so we can get
         # pixmaps for it.
         wrapping_icon = QIcon(icon_path)
@@ -406,25 +577,28 @@ class IconManager():
                 icon.addPixmap(wrapping_icon.pixmap(size, size))
             return icon
         else:
-            # Normal state
+            # These are the necessary adjustments for our SVG icons.
+
+            # -- Normal state
             # NOTE: We take pixmaps as large as the ones below to not have
             # pixelated icons on high dpi screens.
             # Fixes spyder-ide/spyder#19520
             normal_state = wrapping_icon.pixmap(512, 512)
             icon.addPixmap(normal_state, QIcon.Normal)
 
-            # This is the color GammaRay reports for icons in disabled
-            # buttons, both for the dark and light themes
-            disabled_color = QColor(150, 150, 150)
-
-            # Paint icon with the previous color to get the disabled state.
+            # -- Disabled state
             # Taken from https://stackoverflow.com/a/65618075/438386
+            disabled_color = QColor(SpyderPalette.COLOR_DISABLED)
             disabled_state = wrapping_icon.pixmap(512, 512)
             qp = QPainter(disabled_state)
             qp.setCompositionMode(QPainter.CompositionMode_SourceIn)
             qp.fillRect(disabled_state.rect(), disabled_color)
             qp.end()
             icon.addPixmap(disabled_state, QIcon.Disabled)
+
+            # -- Selected state
+            # We use the normal state pixmap for the selected state as well.
+            icon.addPixmap(normal_state, QIcon.Selected)
 
             return icon
 
@@ -440,6 +614,7 @@ class IconManager():
                 args, kwargs = self._qtaargs[name]
                 if scale_factor is not None:
                     kwargs['scale_factor'] = scale_factor
+                kwargs['color_disabled'] = SpyderPalette.COLOR_DISABLED
                 return qta.icon(*args, **kwargs)
             except KeyError:
                 # Load custom icons
@@ -470,9 +645,9 @@ class IconManager():
             return self.ICONS_BY_EXTENSION[(extension, scale_factor)]
 
         if osp.isdir(fname):
-            icon_by_extension = self.icon('DirOpenIcon', scale_factor)
+            icon_by_extension = self.icon('DirClosedIcon', scale_factor)
         else:
-            icon_by_extension = self.icon('binary')
+            icon_by_extension = self.icon('GenericFileIcon')
 
             if extension in self.OFFICE_FILES:
                 icon_by_extension = self.icon(
@@ -485,7 +660,7 @@ class IconManager():
                     icon_by_extension = self.icon('notebook')
                 elif extension == '.tex':
                     icon_by_extension = self.icon('file_type_tex')
-                elif is_text_file(fname):
+                elif extension in EDIT_EXTENSIONS:
                     icon_by_extension = self.icon('TextFileIcon', scale_factor)
                 elif mime_type is not None:
                     try:

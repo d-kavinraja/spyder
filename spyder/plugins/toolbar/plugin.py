@@ -20,7 +20,7 @@ from spyder.api.plugins import SpyderPluginV2, Plugins
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
 from spyder.api.translations import _
-from spyder.plugins.mainmenu.api import ApplicationMenus, ViewMenuSections
+from spyder.plugins.mainmenu.api import ApplicationMenus, WindowMenuSections
 from spyder.plugins.toolbar.api import ApplicationToolbars
 from spyder.plugins.toolbar.container import (
     ToolbarContainer, ToolbarMenus, ToolbarActions)
@@ -38,8 +38,8 @@ class Toolbar(SpyderPluginV2):
     CONTAINER_CLASS = ToolbarContainer
     CAN_BE_DISABLED = False
 
-    # --- SpyderDocakblePlugin API
-    #  -----------------------------------------------------------------------
+    # ---- SpyderPluginV2 API
+    # -------------------------------------------------------------------------
     @staticmethod
     def get_name():
         return _('Toolbar')
@@ -57,69 +57,53 @@ class Toolbar(SpyderPluginV2):
         create_app_toolbar(ApplicationToolbars.File, _("File toolbar"))
         create_app_toolbar(ApplicationToolbars.Run, _("Run toolbar"))
         create_app_toolbar(ApplicationToolbars.Debug, _("Debug toolbar"))
+        create_app_toolbar(ApplicationToolbars.Profile, _("Profile toolbar"))
         create_app_toolbar(ApplicationToolbars.Main, _("Main toolbar"))
 
     @on_plugin_available(plugin=Plugins.MainMenu)
     def on_main_menu_available(self):
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        # View menu Toolbar section
+        # Window menu Toolbar section
         mainmenu.add_item_to_application_menu(
             self.toolbars_menu,
-            menu_id=ApplicationMenus.View,
-            section=ViewMenuSections.Toolbar,
-            before_section=ViewMenuSections.Layout)
+            menu_id=ApplicationMenus.Window,
+            section=WindowMenuSections.Toolbar,
+            before_section=WindowMenuSections.Layout)
         mainmenu.add_item_to_application_menu(
             self.show_toolbars_action,
-            menu_id=ApplicationMenus.View,
-            section=ViewMenuSections.Toolbar,
-            before_section=ViewMenuSections.Layout)
+            menu_id=ApplicationMenus.Window,
+            section=WindowMenuSections.Toolbar,
+            before_section=WindowMenuSections.Layout)
 
     @on_plugin_teardown(plugin=Plugins.MainMenu)
     def on_main_menu_teardown(self):
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        # View menu Toolbar section
+        # Window menu Toolbar section
         mainmenu.remove_item_from_application_menu(
             ToolbarMenus.ToolbarsMenu,
-            menu_id=ApplicationMenus.View)
+            menu_id=ApplicationMenus.Window)
         mainmenu.remove_item_from_application_menu(
             ToolbarActions.ShowToolbars,
-            menu_id=ApplicationMenus.View)
+            menu_id=ApplicationMenus.Window)
 
     def on_mainwindow_visible(self):
         container = self.get_container()
 
-        # TODO: Until all core plugins are migrated, this is needed.
-        ACTION_MAP = {
-            ApplicationToolbars.File: self._main.file_toolbar_actions
-        }
-        for toolbar in container.get_application_toolbars():
-            toolbar_id = toolbar.ID
-            if toolbar_id in ACTION_MAP:
-                section = 0
-                for item in ACTION_MAP[toolbar_id]:
-                    if item is None:
-                        section += 1
-                        continue
+        # Load all toolbars
+        container.load_application_toolbars()
 
-                    self.add_item_to_application_toolbar(
-                        item,
-                        toolbar_id=toolbar_id,
-                        section=str(section),
-                        omit_id=True
-                    )
-
-            toolbar._render()
-
+        # Create toolbars menu and show last visible toolbars
         container.create_toolbars_menu()
         container.load_last_visible_toolbars()
 
     def on_close(self, _unused):
         container = self.get_container()
         container.save_last_visible_toolbars()
+        container.save_last_toolbars()
         for toolbar in container._visible_toolbars:
             toolbar.setVisible(False)
 
-    # --- Public API
+    # ---- Public API
     # ------------------------------------------------------------------------
     def create_application_toolbar(self, toolbar_id, title):
         """
@@ -249,7 +233,8 @@ class Toolbar(SpyderPluginV2):
         for toolbar in self.toolbarslist:
             toolbar.setMovable(not value)
 
-    # --- Convenience properties, while all plugins migrate.
+    # ---- Convenience properties
+    # -------------------------------------------------------------------------
     @property
     def toolbars_menu(self):
         return self.get_container().get_menu("toolbars_menu")

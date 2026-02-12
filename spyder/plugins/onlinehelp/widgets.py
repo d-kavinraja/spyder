@@ -17,16 +17,20 @@ import sys
 # Third party imports
 from qtpy.QtCore import Qt, QThread, QUrl, Signal, Slot
 from qtpy.QtGui import QCursor
-from qtpy.QtWebEngineWidgets import WEBENGINE
 from qtpy.QtWidgets import QApplication, QLabel, QVBoxLayout
 
 # Local imports
 from spyder.api.translations import _
 from spyder.api.widgets.main_widget import PluginMainWidget
 from spyder.plugins.onlinehelp.pydoc_patch import _start_server, _url_handler
-from spyder.widgets.browser import FrameWebView, WebViewActions
 from spyder.widgets.comboboxes import UrlComboBox
 from spyder.widgets.findreplace import FindReplace
+
+# In case WebEngine is not available (e.g. in Conda-forge)
+try:
+    from qtpy.QtWebEngineWidgets import WEBENGINE
+except ImportError:
+    WEBENGINE = False
 
 
 # --- Constants
@@ -59,7 +63,9 @@ DIRECT_PYDOC_IMPORT_MODULES = ['numpy', 'numpy.core']
 try:
     from pydoc import safeimport
 
-    def spyder_safeimport(path, forceload=0, cache={}):
+    def spyder_safeimport(path, forceload=0, cache=None):
+        cache = {} if cache is None else cache
+
         if path in DIRECT_PYDOC_IMPORT_MODULES:
             forceload = 0
         return safeimport(path, forceload=forceload, cache=cache)
@@ -139,6 +145,8 @@ class PydocBrowser(PluginMainWidget):
     """
 
     def __init__(self, name=None, plugin=None, parent=None):
+        from spyder.widgets.browser import FrameWebView
+
         super().__init__(name, plugin, parent=parent)
 
         self._is_running = False
@@ -193,6 +201,8 @@ class PydocBrowser(PluginMainWidget):
         return self.url_combo
 
     def setup(self):
+        from spyder.widgets.browser import WebViewActions
+
         # Actions
         home_action = self.create_action(
             PydocBrowserActions.Home,
@@ -229,20 +239,11 @@ class PydocBrowser(PluginMainWidget):
         # Signals
         self.find_widget.visibility_changed.connect(find_action.setChecked)
 
-        for __, action in self.get_actions().items():
-            if action:
-                # IMPORTANT: Since we are defining the main actions in here
-                # and the context is WidgetWithChildrenShortcut we need to
-                # assign the same actions to the children widgets in order
-                # for shortcuts to work
-                try:
-                    self.webview.addAction(action)
-                except RuntimeError:
-                    pass
-
         self.sig_toggle_view_changed.connect(self.initialize)
 
     def update_actions(self):
+        from spyder.widgets.browser import WebViewActions
+
         stop_action = self.get_action(WebViewActions.Stop)
         refresh_action = self.get_action(WebViewActions.Refresh)
 
@@ -271,6 +272,8 @@ class PydocBrowser(PluginMainWidget):
 
     def _handle_url_combo_activation(self):
         """Load URL from combo box first item."""
+        from spyder.widgets.browser import WebViewActions
+
         if not self._is_running:
             text = str(self.url_combo.currentText())
             self.go_to(self.text_to_url(text))

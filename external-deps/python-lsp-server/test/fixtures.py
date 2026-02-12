@@ -5,8 +5,6 @@ import os
 from io import StringIO
 from unittest.mock import MagicMock
 
-from test.test_utils import ClientServerPair
-
 import pytest
 from pylsp_jsonrpc.dispatchers import MethodDispatcher
 from pylsp_jsonrpc.endpoint import Endpoint
@@ -15,8 +13,8 @@ from pylsp_jsonrpc.exceptions import JsonRpcException
 from pylsp import uris
 from pylsp.config.config import Config
 from pylsp.python_lsp import PythonLSPServer
-from pylsp.workspace import Workspace, Document
-
+from pylsp.workspace import Document, Workspace
+from test.test_utils import CALL_TIMEOUT_IN_SECONDS, ClientServerPair
 
 DOC_URI = uris.from_fs_path(__file__)
 DOC = """import sys
@@ -24,7 +22,6 @@ DOC = """import sys
 def main():
     print sys.stdin.read()
 """
-CALL_TIMEOUT_IN_SECONDS = 30
 
 
 class FakeEditorMethodsMixin:
@@ -107,7 +104,7 @@ def consumer():
 
 
 @pytest.fixture()
-def endpoint(consumer):  # pylint: disable=redefined-outer-name
+def endpoint(consumer):
     class Dispatcher(FakeEditorMethodsMixin, MethodDispatcher):
         pass
 
@@ -115,7 +112,7 @@ def endpoint(consumer):  # pylint: disable=redefined-outer-name
 
 
 @pytest.fixture
-def workspace(tmpdir, endpoint):  # pylint: disable=redefined-outer-name
+def workspace(tmpdir, endpoint) -> None:
     """Return a workspace."""
     ws = Workspace(uris.from_fs_path(str(tmpdir)), endpoint)
     ws._config = Config(ws.root_uri, {}, 0, {})
@@ -124,7 +121,7 @@ def workspace(tmpdir, endpoint):  # pylint: disable=redefined-outer-name
 
 
 @pytest.fixture
-def workspace_other_root_path(tmpdir, endpoint):  # pylint: disable=redefined-outer-name
+def workspace_other_root_path(tmpdir, endpoint):
     """Return a workspace with a root_path other than tmpdir."""
     ws_path = str(tmpdir.mkdir("test123").mkdir("test456"))
     ws = Workspace(uris.from_fs_path(ws_path), endpoint)
@@ -133,7 +130,7 @@ def workspace_other_root_path(tmpdir, endpoint):  # pylint: disable=redefined-ou
 
 
 @pytest.fixture
-def config(workspace):  # pylint: disable=redefined-outer-name
+def config(workspace):
     """Return a config object."""
     cfg = Config(workspace.root_uri, {}, 0, {})
     cfg._plugin_settings = {
@@ -143,12 +140,12 @@ def config(workspace):  # pylint: disable=redefined-outer-name
 
 
 @pytest.fixture
-def doc(workspace):  # pylint: disable=redefined-outer-name
+def doc(workspace):
     return Document(DOC_URI, workspace, DOC)
 
 
 @pytest.fixture
-def temp_workspace_factory(workspace):  # pylint: disable=redefined-outer-name
+def temp_workspace_factory(workspace):
     """
     Returns a function that creates a temporary workspace from the files dict.
     The dict is in the format {"file_name": "file_contents"}
@@ -169,7 +166,7 @@ def temp_workspace_factory(workspace):  # pylint: disable=redefined-outer-name
 
 
 @pytest.fixture
-def client_server_pair():
+def client_server_pair() -> None:
     """A fixture that sets up a client/server pair and shuts down the server"""
     client_server_pair_obj = ClientServerPair()
 
@@ -180,3 +177,17 @@ def client_server_pair():
     ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
     assert shutdown_response is None
     client_server_pair_obj.client._endpoint.notify("exit")
+
+
+@pytest.fixture
+def workspace_with_signature_docstring_disabled(workspace) -> None:
+    workspace._config.update(
+        {
+            "signature": {
+                **workspace._config.settings().get("signature", {}),
+                "include_docstring": False,
+            },
+        }
+    )
+
+    yield workspace

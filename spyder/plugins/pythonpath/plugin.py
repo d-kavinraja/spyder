@@ -34,30 +34,18 @@ class PythonpathManager(SpyderPluginV2):
     CONF_SECTION = NAME
     CONF_FILE = False
 
-    sig_pythonpath_changed = Signal(object, object)
+    sig_pythonpath_changed = Signal(object, bool)
     """
     This signal is emitted when there is a change in the Pythonpath handled by
     Spyder.
 
     Parameters
     ----------
-    old_path_dict: OrderedDict
-        Previous Pythonpath ordered dictionary. Its keys correspond to the
-        project, user and system paths declared by users or detected by Spyder,
-        and its values are their state (i.e. True for enabled and False for
-        disabled).
+    new_path_list: list of str
+        New list of PYTHONPATH paths.
 
-    new_path_dict: OrderedDict
-        New Pythonpath dictionary.
-
-    Notes
-    -----
-    It should be possible to simplify this by sending only the new path dict.
-    However, that requires changes in Spyder-kernels.
-
-    See Also
-    --------
-    :py:meth:`.PythonpathContainer._get_spyder_pythonpath_dict`
+    prioritize
+        Whether to prioritize PYTHONPATH in sys.path
     """
 
     # ---- SpyderPluginV2 API
@@ -85,9 +73,9 @@ class PythonpathManager(SpyderPluginV2):
         main_menu.add_item_to_application_menu(
             container.path_manager_action,
             menu_id=ApplicationMenus.Tools,
-            section=ToolsMenuSections.Tools,
+            section=ToolsMenuSections.Managers,
             before=ApplicationActions.SpyderUserEnvVariables,
-            before_section=ToolsMenuSections.External
+            before_section=ToolsMenuSections.Preferences,
         )
 
     @on_plugin_available(plugin=Plugins.Projects)

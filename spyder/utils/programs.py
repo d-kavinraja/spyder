@@ -8,10 +8,11 @@
 
 # Standard library imports
 from ast import literal_eval
-from getpass import getuser
-from textwrap import dedent
+import asyncio
 import glob
+from getpass import getuser
 import importlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import itertools
 import os
 import os.path as osp
@@ -19,17 +20,20 @@ import re
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 import threading
 import time
 import logging
 
 # Third party imports
 from packaging.version import parse
-import pkg_resources
 import psutil
+from requests.structures import CaseInsensitiveDict
+from spyder_kernels.utils.pythonenv import is_conda_env
 
 # Local imports
-from spyder.config.base import _, running_under_pytest, get_home_dir
+from spyder.api.translations import _
+from spyder.config.base import running_under_pytest, get_home_dir
 from spyder.utils import encoding
 from spyder.utils.misc import get_python_executable
 
@@ -70,7 +74,7 @@ def get_temp_dir(suffix=None):
     return tempdir
 
 
-def is_program_installed(basename):
+def is_program_installed(basename, extra_paths=None):
     """
     Return program absolute path if installed in PATH.
     Otherwise, return None.
@@ -78,18 +82,20 @@ def is_program_installed(basename):
     Also searches specific platform dependent paths that are not already in
     PATH. This permits general use without assuming user profiles are
     sourced (e.g. .bash_Profile), such as when login shells are not used to
-    launch Spyder.
+    launch Spyder. Additionally, extra_paths are searched.
 
     On macOS systems, a .app is considered installed if it exists.
     """
+    extra_paths = [] if extra_paths is None else extra_paths
     home = get_home_dir()
-    req_paths = []
     if (
         sys.platform == 'darwin'
         and basename.endswith('.app')
         and osp.exists(basename)
     ):
         return basename
+
+    pixi = [osp.join(home, '.pixi', 'bin')]
 
     if os.name == 'posix':
         pyenv = [
@@ -109,21 +115,27 @@ def is_program_installed(basename):
              'Miniconda3', 'Anaconda3', 'Miniconda', 'Anaconda']
 
     conda = [osp.join(*p, 'condabin') for p in itertools.product(a, b)]
-    req_paths.extend(pyenv + conda)
 
-    for path in os.environ['PATH'].split(os.pathsep) + req_paths:
+    for path in (
+        extra_paths
+        + conda
+        + pyenv
+        + pixi
+        + os.getenv("PATH", []).split(os.pathsep)
+    ):
         abspath = osp.join(path, basename)
         if osp.isfile(abspath):
             return abspath
 
 
-def find_program(basename):
+def find_program(basename, extra_paths=None):
     """
     Find program in PATH and return absolute path
 
     Try adding .exe or .bat to basename on Windows platforms
     (return None if not found)
     """
+    extra_paths = [] if extra_paths is None else extra_paths
     names = [basename]
     if os.name == 'nt':
         # Windows platforms
@@ -131,7 +143,7 @@ def find_program(basename):
         if not basename.endswith(extensions):
             names = [basename + ext for ext in extensions] + [basename]
     for name in names:
-        path = is_program_installed(name)
+        path = is_program_installed(name, extra_paths)
         if path:
             return path
 
@@ -174,26 +186,21 @@ def alter_subprocess_kwargs_by_platform(**kwargs):
         CONSOLE_CREATION_FLAGS |= CREATE_NO_WINDOW
         kwargs.setdefault('creationflags', CONSOLE_CREATION_FLAGS)
 
-        # ensure Windows subprocess environment has SYSTEMROOT
-        if kwargs.get('env') is not None:
-            # Is SYSTEMROOT, SYSTEMDRIVE in env? case insensitive
+        # Ensure Windows subprocess environment has certain variables
+        if "env" in kwargs:
+            env = CaseInsensitiveDict(kwargs.get("env"))
             for env_var in ['SYSTEMROOT', 'SYSTEMDRIVE', 'USERPROFILE']:
-                if env_var not in map(str.upper, kwargs['env'].keys()):
-                    # Add from os.environ
-                    for k, v in os.environ.items():
-                        if env_var == k.upper():
-                            kwargs['env'].update({k: v})
-                            break  # don't risk multiple values
+                env.setdefault(env_var, os.getenv(env_var))
+            kwargs["env"] = dict(env)
     else:
         # linux and macOS
-        if kwargs.get('env') is not None:
-            if 'HOME' not in kwargs['env']:
-                kwargs['env'].update({'HOME': get_home_dir()})
+        if "env" in kwargs:
+            kwargs["env"].setdefault("HOME", get_home_dir())
 
     return kwargs
 
 
-def run_shell_command(cmdstr, **subprocess_kwargs):
+def run_shell_command(cmdstr, asynchronous=False, **subprocess_kwargs):
     """
     Execute the given shell command.
 
@@ -201,16 +208,28 @@ def run_shell_command(cmdstr, **subprocess_kwargs):
 
     If 'shell' is given in subprocess_kwargs it must be True,
     otherwise ProgramError will be raised.
-    .
+
     If 'executable' is not given in subprocess_kwargs, it will
     be set to the value of the SHELL environment variable.
 
     Note that stdin, stdout and stderr will be set by default
     to PIPE unless specified in subprocess_kwargs.
 
-    :str cmdstr: The string run as a shell command.
-    :subprocess_kwargs: These will be passed to subprocess.Popen.
+    Parameters
+    ----------
+    cmdstr : str
+        The string run as a shell command.
+    asynchronous : bool (False)
+        Whether to return a subprocess.Popen or asyncio.subprocess.Process.
+    **subprocess_kwargs : keyword arguments
+        These will be passed to subprocess.Popen.
     """
+    popen = subprocess.Popen
+    pipe = subprocess.PIPE
+    if asynchronous:
+        popen = asyncio.create_subprocess_shell
+        pipe = asyncio.subprocess.PIPE
+
     if 'shell' in subprocess_kwargs and not subprocess_kwargs['shell']:
         raise ProgramError('The "shell" kwarg may be omitted, but if '
                            'provided it must be True.')
@@ -225,10 +244,10 @@ def run_shell_command(cmdstr, **subprocess_kwargs):
             subprocess_kwargs['executable'] = os.getenv('SHELL')
 
     for stream in ['stdin', 'stdout', 'stderr']:
-        subprocess_kwargs.setdefault(stream, subprocess.PIPE)
+        subprocess_kwargs.setdefault(stream, pipe)
     subprocess_kwargs = alter_subprocess_kwargs_by_platform(
         **subprocess_kwargs)
-    return subprocess.Popen(cmdstr, **subprocess_kwargs)
+    return popen(cmdstr, **subprocess_kwargs)
 
 
 def run_program(program, args=None, **subprocess_kwargs):
@@ -656,11 +675,14 @@ def python_script_exists(package=None, module=None):
             return path
 
 
-def run_python_script(package=None, module=None, args=[], p_args=[]):
+def run_python_script(package=None, module=None, args=None, p_args=None):
     """
     Run Python script in a separate process
     package=None -> module is in sys.path (standard library modules)
     """
+    args = [] if args is None else args
+    p_args = [] if p_args is None else p_args
+
     assert module is not None
     assert isinstance(args, (tuple, list)) and isinstance(p_args, (tuple, list))
     path = python_script_exists(package, module)
@@ -974,8 +996,44 @@ def check_version(actver, version, cmp_op):
         return True
 
 
-def get_module_version(module_name):
+def get_module_version(module_name, interpreter=None):
     """Return module version or None if version can't be retrieved."""
+    if interpreter:
+        cmd = dedent(
+            """
+            try:
+                import {} as mod
+            except Exception:
+                print('No Module')  # spyder: test-skip
+            print(
+                getattr(mod, '__version__', getattr(mod, 'VERSION', None))
+            )  # spyder: test-skip
+            """
+        ).format(module_name)
+
+        # Use clean environment while preserving basic environment variables
+        # needed to properly detect installed modules like `spyder-kernels`
+        # from system-wide Python installations on Windows.
+        # See spyder-ide/spyder#20968
+        env = {}
+        if os.name == "nt":
+            if "USERPROFILE" in os.environ:
+                env["USERPROFILE"] = os.environ["USERPROFILE"]
+
+            if "APPDATA" in os.environ:
+                env["APPDATA"] = os.environ["APPDATA"]
+
+        proc = run_program(interpreter, ['-c', cmd], env=env)
+        stdout, stderr = proc.communicate()
+        stdout = stdout.decode().strip()
+
+        if 'No Module' in stdout:
+            raise RuntimeError("No module named " + str(module_name))
+        if stdout != 'None':
+            # the module is installed and it has a version attribute
+            return stdout
+        return None
+
     mod = __import__(module_name)
     ver = getattr(mod, '__version__', getattr(mod, 'VERSION', None))
     if not ver:
@@ -985,13 +1043,9 @@ def get_module_version(module_name):
 
 def get_package_version(package_name):
     """Return package version or None if version can't be retrieved."""
-
-    # When support for Python 3.7 and below is dropped, this can be replaced
-    # with the built-in importlib.metadata.version
     try:
-        ver = pkg_resources.get_distribution(package_name).version
-        return ver
-    except pkg_resources.DistributionNotFound:
+        return package_version(package_name)
+    except PackageNotFoundError:
         return None
 
 
@@ -1016,28 +1070,10 @@ def is_module_installed(module_name, version=None, interpreter=None,
     """
     if interpreter is not None:
         if is_python_interpreter(interpreter):
-            cmd = dedent("""
-                try:
-                    import {} as mod
-                except Exception:
-                    print('No Module')  # spyder: test-skip
-                print(getattr(mod, '__version__', getattr(mod, 'VERSION', None)))  # spyder: test-skip
-                """).format(module_name)
             try:
-                # use clean environment
-                proc = run_program(interpreter, ['-c', cmd], env={})
-                stdout, stderr = proc.communicate()
-                stdout = stdout.decode().strip()
+                module_version = get_module_version(module_name, interpreter)
             except Exception:
                 return False
-
-            if 'No Module' in stdout:
-                return False
-            elif stdout != 'None':
-                # the module is installed and it has a version attribute
-                module_version = stdout
-            else:
-                module_version = None
         else:
             # Try to not take a wrong decision if interpreter check fails
             return True
@@ -1081,9 +1117,6 @@ def is_python_interpreter_valid_name(filename):
 
 def is_python_interpreter(filename):
     """Evaluate whether a file is a python interpreter or not."""
-    # Must be imported here to avoid circular import
-    from spyder.utils.conda import is_conda_env
-
     real_filename = os.path.realpath(filename)  # To follow symlink if existent
 
     if (not osp.isfile(real_filename) or
@@ -1162,7 +1195,8 @@ def is_spyder_process(pid):
 
         # Valid names for main script
         names = set(['spyder', 'spyder3', 'spyder.exe', 'spyder3.exe',
-                     'bootstrap.py', 'spyder-script.py', 'Spyder.launch.pyw'])
+                     'bootstrap.py', 'spyder-script.py', 'spyder-script.pyw',
+                     'Spyder.launch.pyw'])
         if running_under_pytest():
             names.add('runtests.py')
 

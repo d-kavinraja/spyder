@@ -8,9 +8,13 @@
 Plots Main Widget.
 """
 
+# Standard library imports
+import functools
+
 # Third party imports
 from qtpy.QtCore import Qt, Signal
-from qtpy.QtWidgets import QSpinBox
+from qtpy.QtWidgets import QSpinBox, QInputDialog
+from superqt.utils import signals_blocked
 
 # Local imports
 from spyder.api.config.decorators import on_conf_change
@@ -19,11 +23,10 @@ from spyder.api.widgets.main_widget import PluginMainWidgetMenus
 from spyder.api.shellconnect.main_widget import ShellConnectMainWidget
 from spyder.plugins.plots.widgets.figurebrowser import FigureBrowser
 from spyder.utils.misc import getcwd_or_home
-from spyder.utils.palette import QStylePalette
-from spyder.widgets.helperwidgets import PaneEmptyWidget
+from spyder.utils.palette import SpyderPalette
 
 
-MAIN_BG_COLOR = QStylePalette.COLOR_BACKGROUND_1
+MAIN_BG_COLOR = SpyderPalette.COLOR_BACKGROUND_1
 
 
 # --- Constants
@@ -43,22 +46,37 @@ class PlotsWidgetActions:
     # Toggles
     ToggleMuteInlinePlotting = 'toggle_mute_inline_plotting_action'
     ToggleShowPlotOutline = 'toggle_show_plot_outline_action'
-    ToggleAutoFitPlotting = 'toggle_auto_fit_plotting_action'
+    ToggleAutoFitPlotting = 'auto fit'
+
+    # Inputs
+    MaxPlots = 'max_plots_action'
 
 
 class PlotsWidgetMainToolbarSections:
     Edit = 'edit_section'
-    Move = 'move_section'
-    Zoom = 'zoom_section'
+    ZoomAndMove = 'zoom_section'
 
 
 class PlotsWidgetToolbarItems:
     ZoomSpinBox = 'zoom_spin'
+    ToolbarStretcher = 'toolbar_stretcher'
 
 
 # --- Widgets
 # ----------------------------------------------------------------------------
 class PlotsWidget(ShellConnectMainWidget):
+
+    # PluginMainWidget API
+    SHOW_MESSAGE_WHEN_EMPTY = True
+    IMAGE_WHEN_EMPTY = "plots"
+    MESSAGE_WHEN_EMPTY = _("No plots to show")
+    DESCRIPTION_WHEN_EMPTY = _(
+        "Run plot-generating code in the Editor or IPython console to see "
+        "your figures appear here. This pane only supports static images, so "
+        "it can't display interactive plots like Bokeh, Plotly or Altair."
+    )
+
+    # Signals
     sig_figure_loaded = Signal()
     """This signal is emitted when a figure is loaded succesfully"""
 
@@ -109,13 +127,21 @@ class PlotsWidget(ShellConnectMainWidget):
             initial=self.get_conf('show_plot_outline'),
             option='show_plot_outline'
         )
+        self.set_max_plots_action = self.create_action(
+            PlotsWidgetActions.MaxPlots,
+            text=_('Set maximum number of plots'),
+            icon=self.create_icon("transparent"),
+            tip=_('Set maximum number of plots'),
+            triggered=functools.partial(self.set_max_plots, None),
+        )
         self.fit_action = self.create_action(
             name=PlotsWidgetActions.ToggleAutoFitPlotting,
-            text=_("Fit plots to window"),
-            tip=_("Automatically fit plots to Plot pane size."),
-            toggled=True,
-            initial=self.get_conf('auto_fit_plotting'),
-            option='auto_fit_plotting'
+            text=_("Fit plots to pane"),
+            tip=_("Fit plot to the pane size"),
+            icon=self.create_icon("plot.fit_to_pane"),
+            toggled=self.fit_to_pane,
+            initial=False,
+            register_shortcut=True,
         )
 
         # Toolbar actions
@@ -154,7 +180,7 @@ class PlotsWidget(ShellConnectMainWidget):
             name=PlotsWidgetActions.CloseAll,
             text=_("Remove all plots"),
             tip=_("Remove all plots"),
-            icon=self.create_icon('filecloseall'),
+            icon=self.create_icon('editdelete'),
             triggered=self.remove_all_plots,
             register_shortcut=True,
         )
@@ -193,19 +219,44 @@ class PlotsWidget(ShellConnectMainWidget):
 
         # Options menu
         options_menu = self.get_options_menu()
-        self.add_item_to_menu(self.mute_action, menu=options_menu)
-        self.add_item_to_menu(self.outline_action, menu=options_menu)
-        self.add_item_to_menu(self.fit_action, menu=options_menu)
+        for action in [
+            self.mute_action,
+            self.outline_action,
+            self.set_max_plots_action,
+        ]:
+            self.add_item_to_menu(action, menu=options_menu)
 
         # Main toolbar
         main_toolbar = self.get_main_toolbar()
-        for item in [save_action, save_all_action, copy_action, remove_action,
-                     remove_all_action, previous_action, next_action,
-                     zoom_in_action, zoom_out_action, self.zoom_disp]:
+        for item in [
+            save_action,
+            save_all_action,
+            copy_action,
+            remove_action,
+            remove_all_action,
+        ]:
             self.add_item_to_toolbar(
                 item,
                 toolbar=main_toolbar,
                 section=PlotsWidgetMainToolbarSections.Edit,
+            )
+
+        stretcher = self.create_stretcher(
+            PlotsWidgetToolbarItems.ToolbarStretcher
+        )
+        for item in [
+            self.zoom_disp,
+            zoom_out_action,
+            zoom_in_action,
+            self.fit_action,
+            stretcher,
+            previous_action,
+            next_action,
+        ]:
+            self.add_item_to_toolbar(
+                item,
+                toolbar=main_toolbar,
+                section=PlotsWidgetMainToolbarSections.ZoomAndMove,
             )
 
         # Context menu
@@ -217,51 +268,36 @@ class PlotsWidget(ShellConnectMainWidget):
         value = False
         widget = self.current_widget()
         figviewer = None
-        if widget and not self.is_current_widget_empty():
+
+        if widget and not self.is_current_widget_error_message():
             figviewer = widget.figviewer
-            thumbnails_sb = widget.thumbnails_sb
             value = figviewer.figcanvas.fig is not None
 
             widget.set_pane_empty(not value)
+            with signals_blocked(self.fit_action):
+                self.fit_action.setChecked(figviewer.auto_fit_plotting)
+
         for __, action in self.get_actions().items():
             try:
-                if action and action not in [self.mute_action,
-                                             self.outline_action,
-                                             self.fit_action,
-                                             self.undock_action,
-                                             self.close_action,
-                                             self.dock_action,
-                                             self.toggle_view_action,
-                                             self.lock_unlock_action]:
+                if action and action not in [
+                    self.mute_action,
+                    self.outline_action,
+                    self.set_max_plots_action,
+                    self.undock_action,
+                    self.close_action,
+                    self.dock_action,
+                    self.toggle_view_action,
+                    self.lock_unlock_action,
+                ]:
                     action.setEnabled(value)
-
-                    # IMPORTANT: Since we are defining the main actions in here
-                    # and the context is WidgetWithChildrenShortcut we need to
-                    # assign the same actions to the children widgets in order
-                    # for shortcuts to work
-                    if figviewer:
-                        figviewer_actions = figviewer.actions()
-                        thumbnails_sb_actions = thumbnails_sb.actions()
-
-                        if action not in figviewer_actions:
-                            figviewer.addAction(action)
-
-                        if action not in thumbnails_sb_actions:
-                            thumbnails_sb.addAction(action)
             except (RuntimeError, AttributeError):
                 pass
 
         self.zoom_disp.setEnabled(value)
 
-        # Disable zoom buttons if autofit
-        if value:
-            value = not self.get_conf('auto_fit_plotting')
-            self.get_action(PlotsWidgetActions.ZoomIn).setEnabled(value)
-            self.get_action(PlotsWidgetActions.ZoomOut).setEnabled(value)
-            self.zoom_disp.setEnabled(value)
-
-    @on_conf_change(option=['auto_fit_plotting', 'mute_inline_plotting',
-                            'show_plot_outline', 'save_dir'])
+    @on_conf_change(
+        option=["mute_inline_plotting", "show_plot_outline", "save_dir"]
+    )
     def on_section_conf_change(self, option, value):
         for index in range(self.count()):
             widget = self._stack.widget(index)
@@ -269,15 +305,22 @@ class PlotsWidget(ShellConnectMainWidget):
                 widget.setup({option: value})
                 self.update_actions()
 
+    @on_conf_change(option='max_plots')
+    def on_max_results_update(self, value):
+        widget = self.current_widget()
+        if widget and not self.is_current_widget_error_message():
+            widget.thumbnails_sb.set_max_plots(value)
+
     # ---- Public API
     # ------------------------------------------------------------------------
     def create_new_widget(self, shellwidget):
-        fig_browser = FigureBrowser(parent=self,
-                                    background_color=MAIN_BG_COLOR)
+        fig_browser = FigureBrowser(
+            parent=self, background_color=MAIN_BG_COLOR
+        )
         fig_browser.set_shellwidget(shellwidget)
+
         fig_browser.sig_redirect_stdio_requested.connect(
             self.sig_redirect_stdio_requested)
-
         fig_browser.sig_figure_menu_requested.connect(
             self.show_figure_menu)
         fig_browser.sig_thumbnail_menu_requested.connect(
@@ -286,6 +329,13 @@ class PlotsWidget(ShellConnectMainWidget):
         fig_browser.sig_save_dir_changed.connect(
             lambda val: self.set_conf('save_dir', val))
         fig_browser.sig_zoom_changed.connect(self.zoom_disp.setValue)
+        fig_browser.sig_show_empty_message_requested.connect(
+            self.switch_empty_message
+        )
+        fig_browser.thumbnails_sb.sig_free_memory_requested.connect(
+            self.sig_free_memory_requested
+        )
+
         return fig_browser
 
     def close_widget(self, fig_browser):
@@ -303,10 +353,11 @@ class PlotsWidget(ShellConnectMainWidget):
         fig_browser.setParent(None)
 
     def switch_widget(self, fig_browser, old_fig_browser):
-        option_keys = [('auto_fit_plotting', True),
-                       ('mute_inline_plotting', True),
-                       ('show_plot_outline', True),
-                       ('save_dir', getcwd_or_home())]
+        option_keys = [
+            ("mute_inline_plotting", True),
+            ("show_plot_outline", True),
+            ("save_dir", getcwd_or_home()),
+        ]
 
         conf_values = {k: self.get_conf(k, d) for k, d in option_keys}
         fig_browser.setup(conf_values)
@@ -381,7 +432,7 @@ class PlotsWidget(ShellConnectMainWidget):
         Add a plot to the figure browser with the given shellwidget, if any.
         """
         fig_browser = self.get_widget_for_shellwidget(shellwidget)
-        if fig_browser and not isinstance(fig_browser, PaneEmptyWidget):
+        if fig_browser and not self.is_current_widget_error_message():
             fig_browser.add_figure(fig, fmt)
 
     def remove_plot(self):
@@ -426,10 +477,61 @@ class PlotsWidget(ShellConnectMainWidget):
         """Perform a zoom in on the main figure."""
         widget = self.current_widget()
         if widget:
+            with signals_blocked(self.fit_action):
+                self.fit_action.setChecked(False)
+            widget.figviewer.auto_fit_plotting = False
             widget.zoom_in()
 
     def zoom_out(self):
         """Perform a zoom out on the main figure."""
         widget = self.current_widget()
         if widget:
+            with signals_blocked(self.fit_action):
+                self.fit_action.setChecked(False)
+            widget.figviewer.auto_fit_plotting = False
             widget.zoom_out()
+
+    def fit_to_pane(self, state):
+        """Fit current plot to the pane size."""
+        widget = self.current_widget()
+        if widget:
+            figviewer = widget.figviewer
+            if state:
+                figviewer.auto_fit_plotting = True
+                figviewer.scale_image()
+            else:
+                figviewer.auto_fit_plotting = False
+                figviewer.zoom_in(to_full_size=True)
+
+    def set_max_plots(self, value=None):
+        """
+        Set maximum amount of plots to see.
+
+        Parameters
+        ----------
+        value: int, optional
+            Number of plots. If None an input dialog will be used.
+            Default is None.
+        """
+        if value is None:
+            # Create dialog
+            dialog = QInputDialog(self)
+
+            # Set dialog properties
+            dialog.setModal(False)
+            dialog.setWindowTitle(_('Max plots'))
+            dialog.setLabelText(_('Set maximum number of plots: '))
+            dialog.setInputMode(QInputDialog.IntInput)
+            dialog.setIntStep(1)
+            dialog.setIntValue(self.get_conf('max_plots'))
+
+            dialog.setIntRange(10, 100)
+
+            # Connect slot
+            dialog.intValueSelected.connect(
+                lambda value: self.set_conf('max_plots', value)
+            )
+
+            dialog.show()
+        else:
+            self.set_conf('max_plots', value)

@@ -19,10 +19,11 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QApplication
 
 # Local imports
+from spyder.api.plugins import Plugins
 from spyder.config.base import running_in_ci
+from spyder.config.manager import CONF
 from spyder.plugins.editor.widgets.gotoline import GoToLineDialog
 from spyder.plugins.editor.widgets.editorstack import EditorStack
-from spyder.config.manager import CONF
 
 
 # ---- Qt Test Fixtures
@@ -34,13 +35,15 @@ def editorstack(qtbot):
     """
     editorstack = EditorStack(None, [], False)
     editorstack.set_find_widget(Mock())
-    editorstack.set_io_actions(Mock(), Mock(), Mock(), Mock())
-    editorstack.close_action.setEnabled(False)
+    editorstack.close_split_action.setEnabled(False)
     editorstack.new('foo.py', 'utf-8', 'Line1\nLine2\nLine3\nLine4')
 
     qtbot.addWidget(editorstack)
     editorstack.show()
     editorstack.go_to_line(1)
+
+    # We need to wait for a bit so shortcuts are registered correctly
+    qtbot.wait(300)
 
     return editorstack
 
@@ -65,12 +68,21 @@ def test_default_keybinding_values():
     assert CONF.get_shortcut('editor', 'cut') == 'Ctrl+X'
     assert CONF.get_shortcut('editor', 'select all') == 'Ctrl+A'
     assert CONF.get_shortcut('editor', 'delete line') == 'Ctrl+D'
-    assert CONF.get_shortcut('editor', 'transform to lowercase') == 'Ctrl+U'
+    assert CONF.get_shortcut('editor', 'transform to lowercase') == 'Alt+U'
     assert CONF.get_shortcut('editor',
-                             'transform to uppercase') == 'Ctrl+Shift+U'
+                             'transform to uppercase') == 'Alt+Shift+U'
     assert CONF.get_shortcut('editor', 'go to line') == 'Ctrl+L'
     assert CONF.get_shortcut('editor', 'next word') == 'Ctrl+Right'
     assert CONF.get_shortcut('editor', 'previous word') == 'Ctrl+Left'
+    assert CONF.get_shortcut('main', 'new file') == 'Ctrl+N'
+    assert CONF.get_shortcut('main', 'open file') == 'Ctrl+O'
+    assert CONF.get_shortcut('main', 'open last closed') == 'Ctrl+Shift+T'
+    assert CONF.get_shortcut('main', 'save file') == 'Ctrl+S'
+    assert CONF.get_shortcut('main', 'save all') == 'Ctrl+Alt+S'
+    assert CONF.get_shortcut('main', 'save as') == 'Ctrl+Shift+S'
+    assert CONF.get_shortcut('main', 'close file 1') == 'Ctrl+W'
+    assert CONF.get_shortcut('main', 'close file 2') == 'Ctrl+F4'
+    assert CONF.get_shortcut('main', 'close all') == 'Ctrl+Shift+W'
 
 
 @pytest.mark.skipif(
@@ -222,7 +234,7 @@ def test_transform_to_lowercase_shortcut(editorstack, qtbot):
 
     # Transform all the text to lowercase.
     qtbot.keyClick(editor, Qt.Key_A, modifier=Qt.ControlModifier)
-    qtbot.keyClick(editor, Qt.Key_U, modifier=Qt.ControlModifier)
+    qtbot.keyClick(editor, Qt.Key_U, modifier=Qt.AltModifier)
     assert editor.toPlainText() == 'line1\nline2\nline3\nline4\n'
 
 
@@ -240,7 +252,7 @@ def test_transform_to_uppercase_shortcut(editorstack, qtbot):
     # Transform all the text to uppercase.
     qtbot.keyClick(editor, Qt.Key_A, modifier=Qt.ControlModifier)
     qtbot.keyClick(editor, Qt.Key_U,
-                   modifier=Qt.ControlModifier | Qt.ShiftModifier)
+                   modifier=Qt.AltModifier | Qt.ShiftModifier)
     assert editor.toPlainText() == 'LINE1\nLINE2\nLINE3\nLINE4\n'
 
 
@@ -338,6 +350,54 @@ def test_builtin_undo_redo(editorstack, qtbot):
     # Redo the last action with Ctrl+Y.
     qtbot.keyClick(editor, Qt.Key_Y, modifier=Qt.ControlModifier)
     assert editor.toPlainText() == 'Something\nLine1\nLine2\nLine3\nLine4\n'
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("linux") and running_in_ci(),
+    reason='Fails on Linux and CI'
+)
+def test_shortcuts_for_new_editors(editorstack, qtbot):
+    """
+    Test that widget shortcuts are working for new editors.
+
+    This is a regression test for spyder-ide/spyder#23151.
+    """
+    # Create new file and give it focus
+    editorstack.new('bar.py', 'utf-8', 'Line5\nLine6\nLine7\nLine8')
+    editorstack.tabs.setCurrentIndex(1)
+
+    # Go to its first line, click the shortcut to comment it and check it was
+    editorstack.go_to_line(1)
+    editor = editorstack.get_current_editor()
+    qtbot.keyClick(editor, Qt.Key_1, modifier=Qt.ControlModifier)
+    assert editor.toPlainText() == '# Line5\nLine6\nLine7\nLine8\n'
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith('linux') and running_in_ci(),
+    reason="It fails on Linux due to the lack of a proper X server."
+)
+@pytest.mark.parametrize(
+    'key, modifier, action',
+    [
+        (Qt.Key_N, Qt.ControlModifier, 'New file'),
+        (Qt.Key_O, Qt.ControlModifier, 'Open file'),
+        (Qt.Key_T, Qt.ControlModifier | Qt.ShiftModifier, 'Open last closed'),
+        (Qt.Key_S, Qt.ControlModifier, 'Save file'),
+        (Qt.Key_S, Qt.ControlModifier | Qt.AltModifier, 'Save all'),
+        (Qt.Key_S, Qt.ControlModifier | Qt.ShiftModifier, 'Save as'),
+        (Qt.Key_W, Qt.ControlModifier, 'Close file'),
+        (Qt.Key_F4, Qt.ControlModifier, 'Close file'),
+        (Qt.Key_W, Qt.ControlModifier | Qt.ShiftModifier, 'Close all'),
+])
+def test_file_shortcut(editorstack, qtbot, key, modifier, action):
+    """
+    Test that typing file shortcuts raises the corresponding signal.
+    """
+    editor = editorstack.get_current_editor()
+    with qtbot.waitSignal(editorstack.sig_trigger_action) as blocker:
+        qtbot.keyClick(editor, key, modifier=modifier)
+    assert blocker.args == [action, Plugins.Application]
 
 
 if __name__ == "__main__":

@@ -24,10 +24,10 @@ import tokenize
 import warnings
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
-from spyder.config.base import _, DEV
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
+from spyder.api.translations import _
+from spyder.config.base import DEV
 from spyder.config.gui import is_dark_interface
-from spyder.py3compat import to_text_string
 
 
 class CustomHTMLDoc(Doc, SpyderFontsMixin):
@@ -164,12 +164,17 @@ class CustomHTMLDoc(Doc, SpyderFontsMixin):
         """Make a link to source file."""
         return '<a href="file:%s">%s</a>' % (url, path)
 
-    def markup(self, text, escape=None, funcs={}, classes={}, methods={}):
+    def markup(
+        self, text, escape=None, funcs=None, classes=None, methods=None
+    ):
         """
         Mark up some plain text, given a context of symbols to look for.
 
         Each context dictionary maps object names to anchor names.
         """
+        funcs = {} if funcs is None else funcs
+        classes = {} if classes is None else classes
+        methods = {} if methods is None else methods
         escape = escape or self.escape
         results = []
         here = 0
@@ -370,9 +375,11 @@ class CustomHTMLDoc(Doc, SpyderFontsMixin):
 
         return result
 
-    def docclass(self, object, name=None, mod=None, funcs={}, classes={},
+    def docclass(self, object, name=None, mod=None, funcs=None, classes=None,
                  *ignored):
         """Produce HTML documentation for a class object."""
+        funcs = {} if funcs is None else funcs
+        classes = {} if classes is None else classes
         realname = object.__name__
         name = name or realname
         bases = object.__bases__
@@ -836,7 +843,7 @@ def _url_handler(url, content_type="text/html"):
             contents = '<br>'.join(html.escape(line) for line in
                                    format_exception_only(type(exc), exc))
         else:
-            contents = '%s' % to_text_string(exc)
+            contents = '%s' % str(exc)
         contents = heading + html.bigsection(url, contents, css_class="error")
         return "Error - %s" % url, contents
 

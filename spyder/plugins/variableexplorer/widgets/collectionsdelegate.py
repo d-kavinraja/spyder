@@ -11,30 +11,63 @@
 import copy
 import datetime
 import functools
+import math
 import operator
+import sys
+import traceback
+from typing import Any, Callable, Optional
 
 # Third party imports
 from qtpy.compat import to_qvariant
-from qtpy.QtCore import QDateTime, Qt, Signal
-from qtpy.QtWidgets import (QAbstractItemDelegate, QDateEdit, QDateTimeEdit,
-                            QItemDelegate, QLineEdit, QMessageBox, QTableView)
+from qtpy.QtCore import (
+    QDateTime,
+    QEvent,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+)
+from qtpy.QtWidgets import (
+    QAbstractItemDelegate,
+    QApplication,
+    QDateEdit,
+    QDateTimeEdit,
+    QItemDelegate,
+    QLineEdit,
+    QMessageBox,
+    QStyle,
+    QStyleOptionButton,
+    QTableView,
+)
+from spyder_kernels.comms.commbase import CommsErrorWrapper
 from spyder_kernels.utils.lazymodules import (
     FakeObject, numpy as np, pandas as pd, PIL)
 from spyder_kernels.utils.nsview import (display_to_value, is_editable_type,
                                          is_known_type)
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
-from spyder.config.base import _, is_conda_based_app
-from spyder.py3compat import is_binary_string, is_text_string, to_text_string
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
+from spyder.api.translations import _
 from spyder.plugins.variableexplorer.widgets.arrayeditor import ArrayEditor
 from spyder.plugins.variableexplorer.widgets.dataframeeditor import (
     DataFrameEditor)
 from spyder.plugins.variableexplorer.widgets.texteditor import TextEditor
+from spyder.utils.icon_manager import ima
 
 
 LARGE_COLLECTION = 1e5
 LARGE_ARRAY = 5e6
+SELECT_ROW_BUTTON_SIZE = 22
+
+# The maximum length of the text in a QLineEdit is 32_767, so do not allow
+# the user to edit an `int` with more than 32_767 digits
+MAX_INT_DIGITS_FOR_EDITING = 32_767
+MAX_INT_BIT_LENGTH_FOR_EDITING = (
+    int(MAX_INT_DIGITS_FOR_EDITING * math.log(10) / math.log(2))
+)
 
 
 class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
@@ -43,10 +76,23 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
     sig_editor_creation_started = Signal()
     sig_editor_shown = Signal()
 
-    def __init__(self, parent=None, namespacebrowser=None):
+    def __init__(
+        self,
+        parent=None,
+        namespacebrowser=None,
+        data_function: Optional[Callable[[], Any]] = None
+    ):
         QItemDelegate.__init__(self, parent)
         self.namespacebrowser = namespacebrowser
+        self.data_function = data_function
         self._editors = {}  # keep references on opened editors
+
+        try:
+            if sys.get_int_max_str_digits() < MAX_INT_DIGITS_FOR_EDITING:
+                sys.set_int_max_str_digits(MAX_INT_DIGITS_FOR_EDITING)
+        except AttributeError:
+            # There was no limit in Python 3.10 and earlier
+            pass
 
     def get_value(self, index):
         if index.isValid():
@@ -55,6 +101,49 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
     def set_value(self, index, value):
         if index.isValid():
             index.model().set_value(index, value)
+
+    def make_data_function(
+        self,
+        index: QModelIndex
+    ) -> Optional[Callable[[], Any]]:
+        """
+        Construct function which returns current value of data.
+
+        This is used to refresh editors created from this piece of data.
+        For instance, if `self` is the delegate for an editor that displays
+        the dict `xxx` and the user opens another editor for `xxx["aaa"]`,
+        then to refresh the data of the second editor, the nested function
+        `datafun` first gets the refreshed data for `xxx` and then gets the
+        item with key "aaa".
+
+        Parameters
+        ----------
+        index : QModelIndex
+            Index of item whose current value is to be returned by the
+            function constructed here.
+
+        Returns
+        -------
+        Optional[Callable[[], Any]]
+            Function which returns the current value of the data, or None if
+            such a function cannot be constructed.
+        """
+        if self.data_function is None:
+            return None
+        key = index.model().keys[index.row()]
+
+        def datafun():
+            data = self.data_function()
+            if isinstance(data, (tuple, list, dict, set)):
+                return data[key]
+
+            try:
+                return getattr(data, key)
+            except (NotImplementedError, AttributeError,
+                    TypeError, ValueError):
+                return None
+
+        return datafun
 
     def show_warning(self, index):
         """
@@ -91,7 +180,6 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
 
     def createEditor(self, parent, option, index, object_explorer=False):
         """Overriding method createEditor"""
-        val_type = index.sibling(index.row(), 1).data()
         self.sig_editor_creation_started.emit()
         if index.column() < 3:
             return None
@@ -108,45 +196,13 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
             value = self.get_value(index)
             if value is None:
                 return None
-        except ImportError as msg:
+        except Exception as exception:
             self.sig_editor_shown.emit()
-            module = str(msg).split("'")[1]
-            if module in ['pandas', 'numpy']:
-                if module == 'numpy':
-                    val_type = 'array'
-                else:
-                    val_type = 'dataframe or series'
-                message = _("Spyder is unable to show the {val_type} object "
-                            "you're trying to view because <tt>{module}</tt> "
-                            "is missing. Please install that package in your "
-                            "Spyder environment to fix this problem.")
-                QMessageBox.critical(
-                    self.parent(), _("Error"),
-                    message.format(val_type=val_type, module=module))
-                return
-            else:
-                if is_conda_based_app():
-                    message = _("Spyder is unable to show the variable you're"
-                                " trying to view because the module "
-                                "<tt>{module}</tt> is not supported "
-                                "by Spyder's standalone application.<br>")
-                else:
-                    message = _("Spyder is unable to show the variable you're"
-                                " trying to view because the module "
-                                "<tt>{module}</tt> is not found in your "
-                                "Spyder environment. Please install this "
-                                "package in this environment.<br>")
-                QMessageBox.critical(self.parent(), _("Error"),
-                                     message.format(module=module))
-                return
-        except Exception as msg:
-            self.sig_editor_shown.emit()
-            QMessageBox.critical(
-                self.parent(), _("Error"),
-                _("Spyder was unable to retrieve the value of "
-                  "this variable from the console.<br><br>"
-                  "The error message was:<br>"
-                  "%s") % to_text_string(msg))
+            msg = _(
+                "Spyder was unable to retrieve the value of this variable "
+                "from the console."
+            )
+            self.show_error(exception, msg)
             return
 
         key = index.model().get_key(index)
@@ -160,10 +216,16 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
             self.sig_editor_shown.emit()
             return None
         # CollectionsEditor for a list, tuple, dict, etc.
-        elif isinstance(value, (list, set, tuple, dict)) and not object_explorer:
+        elif (
+            isinstance(value, (list, set, frozenset, tuple, dict))
+            and not object_explorer
+        ):
             from spyder.widgets.collectionseditor import CollectionsEditor
             editor = CollectionsEditor(
-                parent=parent, namespacebrowser=self.namespacebrowser)
+                parent=parent,
+                namespacebrowser=self.namespacebrowser,
+                data_function=self.make_data_function(index)
+            )
             editor.setup(value, key, icon=self.parent().windowIcon(),
                          readonly=readonly)
             self.create_dialog(editor, dict(model=index.model(), editor=editor,
@@ -174,7 +236,10 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
                 np.ndarray is not FakeObject and not object_explorer):
             # We need to leave this import here for tests to pass.
             from .arrayeditor import ArrayEditor
-            editor = ArrayEditor(parent=parent)
+            editor = ArrayEditor(
+                parent=parent,
+                data_function=self.make_data_function(index)
+            )
             if not editor.setup_and_check(value, title=key, readonly=readonly):
                 self.sig_editor_shown.emit()
                 return
@@ -203,9 +268,24 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
         # DataFrameEditor for a pandas dataframe, series or index
         elif (isinstance(value, (pd.DataFrame, pd.Index, pd.Series))
                 and pd.DataFrame is not FakeObject and not object_explorer):
+            try:
+                source_index = index.model().mapToSource(index)
+            except AttributeError:
+                # index.model() is not a QSortFilterProxyModel
+                source_index = index
+
+            type_of_value = source_index.model().row_type(source_index.row())
+            if type_of_value == 'Polars DataFrame':
+                readonly = True
+
             # We need to leave this import here for tests to pass.
             from .dataframeeditor import DataFrameEditor
-            editor = DataFrameEditor(parent=parent)
+            editor = DataFrameEditor(
+                parent=parent,
+                namespacebrowser=self.namespacebrowser,
+                data_function=self.make_data_function(index),
+                readonly=readonly
+            )
             if not editor.setup_and_check(value, title=key):
                 self.sig_editor_shown.emit()
                 return
@@ -236,19 +316,50 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
                 self.sig_editor_shown.emit()
                 return editor
         # TextEditor for a long string
-        elif is_text_string(value) and len(value) > 40 and not object_explorer:
+        elif (
+            isinstance(value, (str, bytes))
+            and len(value) > 40
+            and not object_explorer
+        ):
             te = TextEditor(None, parent=parent)
             if te.setup_and_check(value):
-                editor = TextEditor(value, key,
-                                    readonly=readonly, parent=parent)
-                self.create_dialog(editor, dict(model=index.model(),
-                                                editor=editor, key=key,
-                                                readonly=readonly))
+                editor = TextEditor(
+                    value,
+                    key,
+                    readonly=True if isinstance(value, bytes) else readonly,
+                    parent=parent,
+                )
+                self.create_dialog(
+                    editor,
+                    dict(
+                        model=index.model(),
+                        editor=editor,
+                        key=key,
+                        readonly=(
+                            True if isinstance(value, bytes) else readonly
+                        ),
+                    ),
+                )
+            else:
+                self.sig_editor_shown.emit()
+
             return None
         # QLineEdit for an individual value (int, float, short string, etc)
         elif is_editable_type(value) and not object_explorer:
             if readonly:
                 self.sig_editor_shown.emit()
+                return None
+            elif (
+                isinstance(value, int)
+                and value.bit_length() >= MAX_INT_BIT_LENGTH_FOR_EDITING
+            ):
+                self.sig_editor_shown.emit()
+                msg_box = QMessageBox(self.parent())
+                msg_box.critical(
+                    self.parent(),
+                    _("Error"),
+                    _("The value of this variable is too large to be edited.")
+                )
                 return None
             else:
                 editor = QLineEdit(parent=parent)
@@ -265,18 +376,71 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
                 return editor
         # ObjectExplorer for an arbitrary Python object
         else:
-            from spyder.plugins.variableexplorer.widgets.objectexplorer \
-                import ObjectExplorer
+            # Don't show the object explorer for short bytes because it's not
+            # really necessary
+            if isinstance(value, bytes):
+                self.sig_editor_shown.emit()
+                return None
+
+            from spyder.plugins.variableexplorer.widgets.objectexplorer import (
+                ObjectExplorer,
+            )
+
             editor = ObjectExplorer(
                 value,
                 name=key,
                 parent=parent,
                 namespacebrowser=self.namespacebrowser,
+                data_function=self.make_data_function(index),
                 readonly=readonly)
             self.create_dialog(editor, dict(model=index.model(),
                                             editor=editor,
                                             key=key, readonly=readonly))
             return None
+
+    def show_error(self, exception: Exception, msg: str) -> None:
+        """
+        Show error dialog box.
+
+        This function is called when an error occurs while getting or setting
+        a variable in the console. The dialog box has a "Show details" button,
+        which shows the exception traceback. If an exception raised in the
+        kernel is the cause, then also show that.
+
+        Parameters
+        ----------
+        exception : Exception
+            The error that occurred.
+        msg : str
+            Message informing the user of what Spyder was doing when the
+            error occurred.
+        """
+        the_problem_is = _('The problem is:')
+        contents = f'{msg}<br><br>{the_problem_is}<br>{exception}'
+        details = ''.join(traceback.format_exception(exception))
+
+        while exception:
+            if (
+                exception.args
+                and isinstance(exception.args[0], CommsErrorWrapper)
+            ):
+                wrapper = exception.args[0]
+                details += '\n'
+                details += _('The following kernel error is associated:')
+                details += '\n'
+                details += ''.join(traceback.format_list(wrapper.tb))
+                details += ''.join(
+                    traceback.format_exception_only(wrapper.error)
+                )
+            exception = exception.__context__
+
+        msg_box = QMessageBox(self.parent())
+        msg_box.setTextFormat(Qt.RichText)  # Needed to enable links
+        msg_box.setText(contents)
+        msg_box.setDetailedText(details)
+        msg_box.setWindowTitle(_('Error'))
+        msg_box.setIcon(QMessageBox.Critical)
+        msg_box.exec_()
 
     def create_dialog(self, editor, data):
         self._editors[id(editor)] = data
@@ -293,7 +457,16 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
             index = data['model'].get_index_from_key(data['key'])
             value = data['editor'].get_value()
             conv_func = data.get('conv', lambda v: v)
-            self.set_value(index, conv_func(value))
+
+            try:
+                self.set_value(index, conv_func(value))
+            except Exception as exception:
+                msg = _(
+                    "Spyder was unable to set this variable in the console "
+                    "to the new value."
+                )
+                self.show_error(exception, msg)
+
         # This is needed to avoid the problem reported on
         # spyder-ide/spyder#8557.
         try:
@@ -336,12 +509,7 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
         """
         value = self.get_value(index)
         if isinstance(editor, QLineEdit):
-            if is_binary_string(value):
-                try:
-                    value = to_text_string(value, 'utf8')
-                except Exception:
-                    pass
-            if not is_text_string(value):
+            if not isinstance(value, str):
                 value = repr(value)
             editor.setText(value)
         elif isinstance(editor, QDateEdit):
@@ -408,14 +576,97 @@ class CollectionsDelegate(QItemDelegate, SpyderFontsMixin):
             height = table_view.rowHeight(row)
             editor.setGeometry(x0, y0, width, height)
         else:
-            super(CollectionsDelegate, self).updateEditorGeometry(
-                editor, option, index)
+            super().updateEditorGeometry(editor, option, index)
+
+    def paint(self, painter, option, index):
+        """Actions to take when painting a cell."""
+        if (
+            # Do this only for the last column
+            index.column() == 3
+            # Do this when the row is hovered or if it's selected
+            and (
+                index.row() == self.parent().hovered_row
+                or index.row() in self.parent().selected_rows()
+            )
+        ):
+            # Paint regular contents
+            super().paint(painter, option, index)
+
+            # Paint an extra button to select the entire row. This is necessary
+            # because in Spyder 6 is not intuitive how to do that since we use
+            # a single click to open the editor associated to the cell.
+            # Fixes spyder-ide/spyder#22524
+            # Solution adapted from https://stackoverflow.com/a/11778012/438386
+
+            # Getting the cell's rectangle
+            rect = option.rect
+
+            # Button left/top coordinates
+            x = rect.left() + rect.width() - SELECT_ROW_BUTTON_SIZE
+            y = rect.top() + rect.height() // 2 - SELECT_ROW_BUTTON_SIZE // 2
+
+            # Create and paint button
+            button = QStyleOptionButton()
+            button.rect = QRect(
+                x, y, SELECT_ROW_BUTTON_SIZE, SELECT_ROW_BUTTON_SIZE
+            )
+            button.text = ""
+            button.icon = (
+                ima.icon("select_row")
+                if index.row() not in self.parent().selected_rows()
+                else ima.icon("deselect_row")
+            )
+            button.iconSize = QSize(20, 20)
+            button.state = QStyle.State_Enabled
+            QApplication.style().drawControl(
+                QStyle.CE_PushButtonLabel, button, painter
+            )
+        else:
+            super().paint(painter, option, index)
+
+    def editorEvent(self, event, model, option, index):
+        """Actions to take when interacting with a cell."""
+        if event.type() == QEvent.MouseButtonRelease and index.column() == 3:
+            # Getting the position of the mouse click
+            click_x = event.x()
+            click_y = event.y()
+
+            # Getting the cell's rectangle
+            rect = option.rect
+
+            # Region for the select row button
+            x = rect.left() + rect.width() - SELECT_ROW_BUTTON_SIZE
+            y = rect.top()
+
+            # Select/deselect row when clicking on the button
+            if click_x > x and (y < click_y < (y + SELECT_ROW_BUTTON_SIZE)):
+                row = index.row()
+                if row in self.parent().selected_rows():
+                    # Deselect row if selected
+                    index_left = index.sibling(row, 0)
+                    index_right = index.sibling(row, 3)
+                    selection = QItemSelection(index_left, index_right)
+                    self.parent().selectionModel().select(
+                        selection, QItemSelectionModel.Deselect
+                    )
+                else:
+                    self.parent().selectRow(row)
+            else:
+                super().editorEvent(event, model, option, index)
+        else:
+            super().editorEvent(event, model, option, index)
+
+        return False
 
 
 class ToggleColumnDelegate(CollectionsDelegate):
     """ToggleColumn Item Delegate"""
-    def __init__(self, parent=None, namespacebrowser=None):
-        CollectionsDelegate.__init__(self, parent, namespacebrowser)
+
+    def __init__(self, parent=None, namespacebrowser=None,
+                 data_function: Optional[Callable[[], Any]] = None):
+        CollectionsDelegate.__init__(
+            self, parent, namespacebrowser, data_function
+        )
         self.current_index = None
         self.old_obj = None
 
@@ -434,6 +685,51 @@ class ToggleColumnDelegate(CollectionsDelegate):
     def set_value(self, index, value):
         if index.isValid():
             index.model().set_value(index, value)
+
+    def make_data_function(
+        self,
+        index: QModelIndex
+    ) -> Optional[Callable[[], Any]]:
+        """
+        Construct function which returns current value of data.
+
+        This is used to refresh editors created from this piece of data.
+        For instance, if `self` is the delegate for an editor displays the
+        object `obj` and the user opens another editor for `obj.xxx.yyy`,
+        then to refresh the data of the second editor, the nested function
+        `datafun` first gets the refreshed data for `obj` and then gets the
+        `xxx` attribute and then the `yyy` attribute.
+
+        Parameters
+        ----------
+        index : QModelIndex
+            Index of item whose current value is to be returned by the
+            function constructed here.
+
+        Returns
+        -------
+        Optional[Callable[[], Any]]
+            Function which returns the current value of the data, or None if
+            such a function cannot be constructed.
+        """
+        if self.data_function is None:
+            return None
+
+        obj_path = index.model().get_key(index).obj_path
+        path_elements = obj_path.split('.')
+        del path_elements[0]  # first entry is variable name
+
+        def datafun():
+            data = self.data_function()
+            try:
+                for attribute_name in path_elements:
+                    data = getattr(data, attribute_name)
+                return data
+            except (NotImplementedError, AttributeError,
+                    TypeError, ValueError):
+                return None
+
+        return datafun
 
     def createEditor(self, parent, option, index):
         """Overriding method createEditor"""
@@ -454,12 +750,18 @@ class ToggleColumnDelegate(CollectionsDelegate):
             if value is None:
                 return None
         except Exception as msg:
-            QMessageBox.critical(
-                self.parent(), _("Error"),
-                _("Spyder was unable to retrieve the value of "
-                  "this variable from the console.<br><br>"
-                  "The error message was:<br>"
-                  "<i>%s</i>") % to_text_string(msg))
+            msg_box = QMessageBox(self.parent())
+            msg_box.setTextFormat(Qt.RichText)  # Needed to enable links
+            msg_box.critical(
+                self.parent(),
+                _("Error"),
+                _(
+                    "Spyder was unable to retrieve the value of this variable "
+                    "from the console.<br><br>"
+                    "The problem is:<br>"
+                    "<i>%s</i>"
+                ) % str(msg)
+            )
             return
         self.current_index = index
 
@@ -468,10 +770,13 @@ class ToggleColumnDelegate(CollectionsDelegate):
                     or not is_known_type(value))
 
         # CollectionsEditor for a list, tuple, dict, etc.
-        if isinstance(value, (list, set, tuple, dict)):
+        if isinstance(value, (list, set, frozenset, tuple, dict)):
             from spyder.widgets.collectionseditor import CollectionsEditor
             editor = CollectionsEditor(
-                parent=parent, namespacebrowser=self.namespacebrowser)
+                parent=parent,
+                namespacebrowser=self.namespacebrowser,
+                data_function=self.make_data_function(index)
+            )
             editor.setup(value, key, icon=self.parent().windowIcon(),
                          readonly=readonly)
             self.create_dialog(editor, dict(model=index.model(), editor=editor,
@@ -480,7 +785,10 @@ class ToggleColumnDelegate(CollectionsDelegate):
         # ArrayEditor for a Numpy array
         elif (isinstance(value, (np.ndarray, np.ma.MaskedArray)) and
                 np.ndarray is not FakeObject):
-            editor = ArrayEditor(parent=parent)
+            editor = ArrayEditor(
+                parent=parent,
+                data_function=self.make_data_function(index)
+            )
             if not editor.setup_and_check(value, title=key, readonly=readonly):
                 return
             self.create_dialog(editor, dict(model=index.model(), editor=editor,
@@ -501,7 +809,11 @@ class ToggleColumnDelegate(CollectionsDelegate):
         # DataFrameEditor for a pandas dataframe, series or index
         elif (isinstance(value, (pd.DataFrame, pd.Index, pd.Series))
                 and pd.DataFrame is not FakeObject):
-            editor = DataFrameEditor(parent=parent)
+            editor = DataFrameEditor(
+                parent=parent,
+                namespacebrowser=self.namespacebrowser,
+                data_function=self.make_data_function(index)
+            )
             if not editor.setup_and_check(value, title=key):
                 return
             self.create_dialog(editor, dict(model=index.model(), editor=editor,
@@ -522,14 +834,26 @@ class ToggleColumnDelegate(CollectionsDelegate):
                 )
                 return editor
         # TextEditor for a long string
-        elif is_text_string(value) and len(value) > 40:
+        elif isinstance(value, (str, bytes)) and len(value) > 40:
             te = TextEditor(None, parent=parent)
             if te.setup_and_check(value):
-                editor = TextEditor(value, key,
-                                    readonly=readonly, parent=parent)
-                self.create_dialog(editor, dict(model=index.model(),
-                                                editor=editor, key=key,
-                                                readonly=readonly))
+                editor = TextEditor(
+                    value,
+                    key,
+                    readonly=True if isinstance(value, bytes) else readonly,
+                    parent=parent,
+                )
+                self.create_dialog(
+                    editor,
+                    dict(
+                        model=index.model(),
+                        editor=editor,
+                        key=key,
+                        readonly=(
+                            True if isinstance(value, bytes) else readonly
+                        ),
+                    ),
+                )
             return None
         # QLineEdit for an individual value (int, float, short string, etc)
         elif is_editable_type(value):
@@ -571,4 +895,4 @@ class ToggleColumnDelegate(CollectionsDelegate):
     def editor_rejected(self, editor_id):
         """Actions to do when the editor was rejected."""
         self.restore_object()
-        super(ToggleColumnDelegate, self).editor_rejected(editor_id)
+        super().editor_rejected(editor_id)

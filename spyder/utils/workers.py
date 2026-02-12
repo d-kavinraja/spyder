@@ -13,7 +13,6 @@ blocking threads.
 # Standard library imports
 from collections import deque
 import logging
-import os
 import sys
 
 # Third party imports
@@ -21,7 +20,6 @@ from qtpy.QtCore import (QByteArray, QObject, QProcess, QThread, QTimer,
                          Signal)
 
 # Local imports
-from spyder.py3compat import to_text_string
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +30,7 @@ def handle_qbytearray(obj, encoding):
     if isinstance(obj, QByteArray):
         obj = obj.data()
 
-    return to_text_string(obj, encoding=encoding)
+    return str(obj, encoding=encoding)
 
 
 class PythonWorker(QObject):
@@ -46,7 +44,7 @@ class PythonWorker(QObject):
 
     def __init__(self, func, args, kwargs):
         """Generic python worker for running python code on threads."""
-        super(PythonWorker, self).__init__()
+        super().__init__()
         self.func = func
         self.args = args
         self.kwargs = kwargs
@@ -103,7 +101,7 @@ class ProcessWorker(QObject):
         environ : dict
             Process environment,
         """
-        super(ProcessWorker, self).__init__(parent)
+        super().__init__(parent)
         self._result = None
         self._cmd_list = cmd_list
         self._fired = False
@@ -124,17 +122,11 @@ class ProcessWorker(QObject):
         self._process.readyReadStandardOutput.connect(self._partial)
 
     def _get_encoding(self):
-        """Return the encoding/codepage to use."""
-        enco = 'utf-8'
-
-        #  Currently only cp1252 is allowed?
-        if os.name == 'nt':
-            import ctypes
-            codepage = to_text_string(ctypes.cdll.kernel32.GetACP())
-            # import locale
-            # locale.getpreferredencoding()  # Differences?
-            enco = 'cp' + codepage
-        return enco
+        """Return the encoding to use."""
+        # It seems that in Python 3 we only need this encoding to correctly
+        # decode bytes on all operating systems.
+        # See spyder-ide/spyder#22546
+        return 'utf-8'
 
     def _set_environment(self, environ):
         """Set the environment on the QProcess."""

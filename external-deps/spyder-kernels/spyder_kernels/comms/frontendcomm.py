@@ -130,9 +130,11 @@ class FrontendComm(CommBase):
         """
         Send comm message to frontend to check if the iopub channel is ready
         """
-        if len(self._pending_comms) == 0:
+        # Make sure the length doesn't change during iteration
+        pending_comms = list(self._pending_comms.values())
+        if len(pending_comms) == 0:
             return
-        for comm in self._pending_comms.values():
+        for comm in pending_comms:
             self._notify_comm_ready(comm)
         self.kernel.io_loop.call_later(1, self._check_comm_reply)
 
@@ -174,8 +176,6 @@ class FrontendComm(CommBase):
         """
         self.calling_comm_id = comm.comm_id
         self._register_comm(comm)
-        self._set_pickle_protocol(
-            msg['content']['data']['pickle_highest_protocol'])
 
         # IOPub might not be connected yet, keep sending messages until a
         # reply is received.
@@ -194,7 +194,7 @@ class FrontendComm(CommBase):
         """
         Send an async error back to the frontend to be displayed.
         """
-        self.remote_call()._async_error(error_wrapper)
+        self.remote_call()._async_error(error_wrapper.to_json())
 
     def _register_comm(self, comm):
         """

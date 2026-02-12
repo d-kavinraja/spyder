@@ -15,6 +15,7 @@ from typing import List
 
 # Third-party imports
 from packaging.version import parse
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QMessageBox
 
 # Local imports
@@ -27,6 +28,7 @@ from spyder.plugins.externalterminal.api import (
     ExtTerminalPyConfiguration, ExtTerminalShConfiguration)
 from spyder.plugins.externalterminal.widgets.run_conf import (
     ExternalTerminalPyConfiguration, ExternalTerminalShConfiguration)
+from spyder.plugins.mainmenu.api import ApplicationMenus, RunMenuSections
 from spyder.plugins.run.api import (
     RunContext, run_execute, RunConfiguration, ExtendedRunExecutionParameters,
     RunResult, RunExecutor)
@@ -61,21 +63,15 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
         self.editor_configurations = [
             {
                 'origin': self.NAME,
-                'extension': ['py'],
-                'contexts': [
-                    {
-                        'name': 'File'
-                    }
-                ]
+                'extension': 'py',
+                'contexts': [{'name': 'File'}]
             }
         ]
 
         self.executor_configuration = [
             {
-                'input_extension': ['py'],
-                'context': {
-                    'name': 'File'
-                },
+                'input_extension': 'py',
+                'context': {'name': 'File'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalPyConfiguration,
                 'requires_cwd': True,
@@ -87,36 +83,27 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
             self.editor_configurations.append({
                 'origin': self.NAME,
                 'extension': 'bat',
-                'contexts': [
-                    {
-                        'name': 'File'
-                    },
-                    {
-                        'name': 'Selection'
-                    }
-                ]
+                'contexts': [{'name': 'File'}, {'name': 'Selection'}]
             })
 
             self.executor_configuration.append({
                 'input_extension': 'bat',
-                'context': {
-                    'name': 'File'
-                },
+                'context': {'name': 'File'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    'cmd.exe', '/K'),
+                    'cmd.exe', '/K'
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
 
             self.executor_configuration.append({
                 'input_extension': 'bat',
-                'context': {
-                    'name': 'Selection'
-                },
+                'context': {'name': 'Selection'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    'cmd.exe', '/K'),
+                    'cmd.exe', '/K'
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
@@ -124,36 +111,27 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
             self.editor_configurations.append({
                 'origin': self.NAME,
                 'extension': 'ps1',
-                'contexts': [
-                    {
-                        'name': 'File'
-                    },
-                    {
-                        'name': 'Selection'
-                    }
-                ]
+                'contexts': [{'name': 'File'}, {'name': 'Selection'}]
             })
 
             self.executor_configuration.append({
                 'input_extension': 'ps1',
-                'context': {
-                    'name': 'File'
-                },
+                'context': {'name': 'File'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    'powershell.exe'),
+                    'powershell.exe'
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
 
             self.executor_configuration.append({
                 'input_extension': 'ps1',
-                'context': {
-                    'name': 'Selection'
-                },
+                'context': {'name': 'Selection'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    'powershell.exe'),
+                    'powershell.exe'
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
@@ -169,36 +147,27 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
             self.editor_configurations.append({
                 'origin': self.NAME,
                 'extension': 'sh',
-                'contexts': [
-                    {
-                        'name': 'File'
-                    },
-                    {
-                        'name': 'Selection'
-                    }
-                ]
+                'contexts': [{'name': 'File'}, {'name': 'Selection'}]
             })
 
             self.executor_configuration.append({
                 'input_extension': 'sh',
-                'context': {
-                    'name': 'File'
-                },
+                'context': {'name': 'File'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    programs.is_program_installed(default_shell)),
+                    programs.is_program_installed(default_shell)
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
 
             self.executor_configuration.append({
                 'input_extension': 'sh',
-                'context': {
-                    'name': 'Selection'
-                },
+                'context': {'name': 'Selection'},
                 'output_formats': [],
                 'configuration_widget': ExternalTerminalShConfiguration(
-                    programs.is_program_installed(default_shell)),
+                    programs.is_program_installed(default_shell)
+                ),
                 'requires_cwd': True,
                 'priority': 1
             })
@@ -207,6 +176,21 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
     def on_run_available(self):
         run = self.get_plugin(Plugins.Run)
         run.register_executor_configuration(self, self.executor_configuration)
+
+        run.create_run_in_executor_button(
+            RunContext.File,
+            self.NAME,
+            text=_("Run in external terminal"),
+            tip=_("Run in an operating system terminal"),
+            icon=self.get_icon(),
+            shortcut_context='_',
+            register_shortcut=True,
+            shortcut_widget_context=Qt.ApplicationShortcut,
+            add_to_menu={
+                "menu": ApplicationMenus.Run,
+                "section": RunMenuSections.RunInExecutors
+            },
+        )
 
     @on_plugin_available(plugin=Plugins.Editor)
     def on_editor_available(self):
@@ -218,7 +202,9 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
     def on_run_teardown(self):
         run = self.get_plugin(Plugins.Run)
         run.deregister_executor_configuration(
-            self, self.executor_configuration)
+            self, self.executor_configuration
+        )
+        run.destroy_run_in_executor_button(RunContext.File, self.NAME)
 
     @on_plugin_teardown(plugin=Plugins.Editor)
     def on_editor_teardown(self):
@@ -229,18 +215,27 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
     # ---- Public API
     # -------------------------------------------------------------------------
     def open_external_python_terminal(self, fname, wdir, args, interact, debug,
-                                     python_args):
+                                      python_args):
         """Open external terminal."""
         # Running script in an external system terminal
         try:
             if self.get_conf('default', section='main_interpreter'):
                 executable = get_python_executable()
             else:
-                executable = self.get_conf('executable',
-                                           section='main_interpreter')
+                executable = self.get_conf(
+                    'executable',
+                    section='main_interpreter'
+                )
+
+            pypath = self.get_conf(
+                'spyder_pythonpath',
+                section='pythonpath_manager',
+                default=[]
+            )
 
             programs.run_python_script_in_terminal(
-                fname, wdir, args, interact, debug, python_args, executable
+                fname, wdir, args, interact, debug, python_args, executable,
+                pypath=pypath
             )
         except NotImplementedError:
             QMessageBox.critical(
@@ -269,7 +264,8 @@ class ExternalTerminal(SpyderPluginV2, RunExecutor):
         debug = False
         python_args = params['python_args']
         self.open_external_python_terminal(
-            filename, wdir, args, interact, debug, python_args)
+            filename, wdir, args, interact, debug, python_args
+        )
 
     @run_execute(extension=['sh', 'bat', 'ps1'])
     def run_shell_files(

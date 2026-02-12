@@ -20,19 +20,40 @@ Collections (i.e. dictionary, list, set and tuple) editor widget and dialog.
 
 # Standard library imports
 import datetime
+from functools import lru_cache
 import io
 import re
 import sys
+import textwrap
+from typing import Any, Callable, Optional
 import warnings
 
 # Third party imports
 from qtpy.compat import getsavefilename, to_qvariant
 from qtpy.QtCore import (
-    QAbstractTableModel, QItemSelectionModel, QModelIndex, Qt, Signal, Slot)
+    QAbstractTableModel,
+    QItemSelectionModel,
+    QModelIndex,
+    Qt,
+    QTimer,
+    Signal,
+    Slot
+)
 from qtpy.QtGui import QColor, QKeySequence
 from qtpy.QtWidgets import (
-    QApplication, QHBoxLayout, QHeaderView, QInputDialog, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget)
+    QApplication,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QTableView,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 from spyder_kernels.utils.lazymodules import (
     FakeObject, numpy as np, pandas as pd, PIL)
 from spyder_kernels.utils.misc import fix_reference_name
@@ -43,24 +64,74 @@ from spyder_kernels.utils.nsview import (
 )
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
-from spyder.api.config.mixins import SpyderConfigurationAccessor
-from spyder.api.widgets.toolbars import SpyderToolbar
-from spyder.config.base import _, running_under_pytest
-from spyder.py3compat import (is_binary_string, to_text_string,
-                              is_type_text_string)
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
+from spyder.api.translations import _
+from spyder.api.widgets.mixins import SpyderWidgetMixin
+from spyder.config.base import running_under_pytest
 from spyder.utils.icon_manager import ima
 from spyder.utils.misc import getcwd_or_home
-from spyder.utils.qthelpers import (
-    add_actions, create_action, MENU_SEPARATOR, mimedata2url)
+from spyder.utils.qthelpers import mimedata2url
 from spyder.utils.stringmatching import get_search_scores, get_search_regex
 from spyder.plugins.variableexplorer.widgets.collectionsdelegate import (
-    CollectionsDelegate)
+    CollectionsDelegate,
+    SELECT_ROW_BUTTON_SIZE,
+)
 from spyder.plugins.variableexplorer.widgets.importwizard import ImportWizard
-from spyder.widgets.helperwidgets import CustomSortFilterProxy
+from spyder.widgets.emptymessage import EmptyMessageWidget
+from spyder.widgets.helperwidgets import CustomSortFilterProxy, MessageCheckBox
 from spyder.plugins.variableexplorer.widgets.basedialog import BaseDialog
 from spyder.utils.palette import SpyderPalette
-from spyder.utils.stylesheet import PANES_TOOLBAR_STYLESHEET
+from spyder.utils.stylesheet import AppStyle, MAC
+
+
+# =============================================================================
+# ---- Constants
+# =============================================================================
+class CollectionsEditorActions:
+    Close = 'close'
+    Copy = 'copy_action'
+    Duplicate = 'duplicate_action'
+    Edit = 'edit_action'
+    Histogram = 'histogram_action'
+    Insert = 'insert_action'
+    InsertAbove = 'insert_above_action'
+    InsertBelow = 'insert_below_action'
+    Paste = 'paste_action'
+    Plot = 'plot_action'
+    Refresh = 'refresh_action'
+    Remove = 'remove_action'
+    Rename = 'rename_action'
+    ResizeColumns = 'resize_columns_action'
+    ResizeRows = 'resize_rows_action'
+    Save = 'save_action'
+    ShowImage = 'show_image_action'
+    ViewObject = 'view_object_action'
+
+
+class CollectionsEditorMenus:
+    Context = 'context_menu'
+    ContextIfEmpty = 'context_menu_if_empty'
+    ConvertTo = 'convert_to_submenu'
+    Header = 'header_context_menu'
+    Index = 'index_context_menu'
+    Options = 'options_menu'
+
+
+class CollectionsEditorWidgets:
+    OptionsToolButton = 'options_button_widget'
+    Toolbar = 'toolbar'
+    ToolbarStretcher = 'toolbar_stretcher'
+
+
+class CollectionsEditorContextMenuSections:
+    Edit = 'edit_section'
+    AddRemove = 'add_remove_section'
+    View = 'view_section'
+
+
+class CollectionsEditorToolbarSections:
+    AddDelete = 'add_delete_section'
+    ViewAndRest = 'view_section'
 
 
 # Maximum length of a serialized variable to be set in the kernel
@@ -74,6 +145,9 @@ ROWS_TO_LOAD = 50
 NUMERIC_TYPES = (int, float) + get_numeric_numpy_types()
 
 
+# =============================================================================
+# ---- Utility functions and classes
+# =============================================================================
 def natsort(s):
     """
     Natural sorting, e.g. test3 comes before test100.
@@ -127,6 +201,9 @@ class ProxyObject(object):
                 raise
 
 
+# =============================================================================
+# ---- Widgets
+# =============================================================================
 class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
     """CollectionsEditor Read-Only Table Model"""
 
@@ -143,11 +220,12 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
         self.minmax = minmax
         self.remote = remote
         self.header0 = None
+        self.previous_sort = -1
         self._data = None
         self.total_rows = None
         self.showndata = None
         self.keys = None
-        self.title = to_text_string(title)  # in case title is not a string
+        self.title = str(title)  # in case title is not a string
         if self.title:
             self.title = self.title + ' - '
         self.sizes = []
@@ -162,8 +240,11 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
         """Set model data"""
         self._data = data
 
-        if (coll_filter is not None and not self.remote and
-                isinstance(data, (tuple, list, dict, set))):
+        if (
+            coll_filter is not None
+            and not self.remote
+            and isinstance(data, (tuple, list, dict, set, frozenset))
+        ):
             data = coll_filter(data)
         self.showndata = data
 
@@ -180,14 +261,12 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
             self.keys = list(range(len(data)))
             self.title += _("Set")
             self._data = list(data)
+        elif isinstance(data, frozenset):
+            self.keys = list(range(len(data)))
+            self.title += _("Frozenset")
+            self._data = list(data)
         elif isinstance(data, dict):
-            try:
-                self.keys = sorted(list(data.keys()), key=natsort)
-            except TypeError:
-                # This is necessary to display dictionaries with mixed
-                # types as keys.
-                # Fixes spyder-ide/spyder#13481
-                self.keys = list(data.keys())
+            self.keys = list(data.keys())
             self.title += _("Dictionary")
             if not self.names:
                 self.header0 = _("Key")
@@ -261,16 +340,68 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
         """Load all the data."""
         self.fetchMore(number_to_fetch=self.total_rows)
 
-    def sort(self, column, order=Qt.AscendingOrder):
-        """Overriding sort method"""
+    def sort(
+        self,
+        column: int,
+        order: Qt.SortOrder = Qt.AscendingOrder
+    ) -> None:
+        """
+        Sort model by given column and order.
+
+        This overrides the method in the base class and it's called by Qt if
+        the user clicks on the header of a column.
+
+        If the collection editor shows a dictionary and the user changes the
+        order of a column from descending to ascending, then instead sort the
+        dict by insertion order. The effect is that clicking on a column
+        header switches between three states: that column is sorting in
+        ascending order, then in descending order, and then the dict reverts
+        to its natural state, which is sorted by insertion order. This
+        implementation is a bit of a hack. In Qt 6, the flag
+        `sortIndicatorClearable` in `QHeaderView` has the same effect.
+
+        If a view uses a proxy model, then the sort function of the proxy model
+        overrides this function and the special handling of dictionaries
+        described in the previous paragraph does not happen. This happens in
+        `RemoteCollectionsEditorTableView` which is used in `NamespaceBrowser`.
+
+        Parameters
+        ----------
+        column : int
+            The column to sort. If column is -1 then return the model to its
+            unsorted state.
+        order : Qt.SortOrder, optional
+            Whether to sort in ascending or descending order. The default is
+            Qt.AscendingOrder.
+        """
 
         def all_string(listlike):
             return all([isinstance(x, str) for x in listlike])
 
+        try:
+            header = self._parent.horizontalHeader()
+        except AttributeError:
+            # may happen in tests
+            header = None
+
+        if (
+            header
+            and order == Qt.AscendingOrder
+            and column != -1
+            and self.previous_sort == column
+            and isinstance(self._data, dict)
+        ):
+            header.setSortIndicator(-1, Qt.AscendingOrder)
+            return
+
+        self.previous_sort = column
         reverse = (order == Qt.DescendingOrder)
         sort_key = natsort if all_string(self.keys) else None
 
-        if column == 0:
+        if column == -1:
+            self.keys = list(self._data.keys())
+            self.set_size_and_type()
+        elif column == 0:
             self.sizes = sort_against(self.sizes, self.keys,
                                       reverse=reverse,
                                       sort_key=natsort)
@@ -418,13 +549,24 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
         if index.column() == 3:
             display = value_to_display(value, minmax=self.minmax)
         else:
-            if is_type_text_string(value):
-                display = to_text_string(value, encoding="utf-8")
+            if isinstance(value, str):
+                display = str(value)
+            elif isinstance(value, bytes):
+                display = str(value, "utf-8")
             elif not isinstance(value, NUMERIC_TYPES):
-                display = to_text_string(value)
+                display = str(value)
             else:
                 display = value
         if role == Qt.ToolTipRole:
+            if self.parent().over_select_row_button:
+                if index.row() in self.parent().selected_rows():
+                    tooltip = _("Click to deselect this row")
+                else:
+                    tooltip = _(
+                        "Click to select this row. Maintain pressed Ctrl (Cmd "
+                        "on macOS) for multiple rows"
+                    )
+                return '\n'.join(textwrap.wrap(tooltip, 50))
             return display
         if role == Qt.UserRole:
             if isinstance(value, NUMERIC_TYPES):
@@ -468,9 +610,10 @@ class ReadOnlyCollectionsModel(QAbstractTableModel, SpyderFontsMixin):
         # This method was implemented in CollectionsModel only, but to enable
         # tuple exploration (even without editing), this method was moved here
         if not index.isValid():
-            return Qt.ItemIsEnabled
-        return Qt.ItemFlags(int(QAbstractTableModel.flags(self, index) |
-                                Qt.ItemIsEditable))
+            return Qt.ItemFlag.ItemIsEnabled
+        return (
+            QAbstractTableModel.flags(self, index) | Qt.ItemFlag.ItemIsEditable
+        )
 
     def reset(self):
         self.beginResetModel()
@@ -508,7 +651,7 @@ class CollectionsModel(ReadOnlyCollectionsModel):
             color = SpyderPalette.GROUP_4
         elif python_type == 'list':
             color = SpyderPalette.GROUP_5
-        elif python_type == 'set':
+        elif python_type in ['set', 'frozenset']:
             color = SpyderPalette.GROUP_6
         elif python_type == 'tuple':
             color = SpyderPalette.GROUP_7
@@ -564,7 +707,7 @@ class BaseHeaderView(QHeaderView):
     sig_user_resized_section = Signal(int, int, int)
 
     def __init__(self, parent=None):
-        super(BaseHeaderView, self).__init__(Qt.Horizontal, parent)
+        super().__init__(Qt.Horizontal, parent)
         self._handle_section_is_pressed = False
         self.sectionResized.connect(self.sectionResizeEvent)
         # Needed to enable sorting by column
@@ -572,12 +715,12 @@ class BaseHeaderView(QHeaderView):
         self.setSectionsClickable(True)
 
     def mousePressEvent(self, e):
-        super(BaseHeaderView, self).mousePressEvent(e)
+        super().mousePressEvent(e)
         self._handle_section_is_pressed = (self.cursor().shape() ==
                                            Qt.SplitHCursor)
 
     def mouseReleaseEvent(self, e):
-        super(BaseHeaderView, self).mouseReleaseEvent(e)
+        super().mouseReleaseEvent(e)
         self._handle_section_is_pressed = False
 
     def sectionResizeEvent(self, logicalIndex, oldSize, newSize):
@@ -585,7 +728,7 @@ class BaseHeaderView(QHeaderView):
             self.sig_user_resized_section.emit(logicalIndex, oldSize, newSize)
 
 
-class BaseTableView(QTableView, SpyderConfigurationAccessor):
+class BaseTableView(QTableView, SpyderWidgetMixin):
     """Base collection editor table view"""
     CONF_SECTION = 'variable_explorer'
 
@@ -598,9 +741,9 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
     def __init__(self, parent):
         super().__init__(parent=parent)
 
+        # Main attributes
         self.array_filename = None
         self.menu = None
-        self.menu_actions = []
         self.empty_ws_menu = None
         self.paste_action = None
         self.copy_action = None
@@ -617,11 +760,15 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         self.rename_action = None
         self.duplicate_action = None
         self.view_action = None
+        self.resize_action = None
+        self.resize_columns_action = None
         self.delegate = None
         self.proxy_model = None
         self.source_model = None
         self.setAcceptDrops(True)
         self.automatic_column_width = True
+
+        # Headder attributes
         self.setHorizontalHeader(BaseHeaderView(parent=self))
         self.horizontalHeader().sig_user_resized_section.connect(
             self.user_resize_columns)
@@ -630,114 +777,191 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         # it to show any information on it.
         self.verticalHeader().hide()
 
+        # To use mouseMoveEvent
+        self.setMouseTracking(True)
+
+        # Delay editing values for a bit so that when users do a double click
+        # (the default behavior for editing since Spyder was created; now they
+        # only have to do a single click), our editor dialogs are focused.
+        self.__index_clicked = None
+        self._edit_value_timer = QTimer(self)
+        self._edit_value_timer.setInterval(100)
+        self._edit_value_timer.setSingleShot(True)
+        self._edit_value_timer.timeout.connect(self._edit_value)
+
+        # To paint the select row button and check if we are over it
+        self.hovered_row = -1
+        self.over_select_row_button = False
+
     def setup_table(self):
         """Setup table"""
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().setSectionsMovable(True)
         self.adjust_columns()
-        # Sorting columns
-        self.setSortingEnabled(True)
-        self.sortByColumn(0, Qt.AscendingOrder)
+
+        # Actions to take when the selection changes
         self.selectionModel().selectionChanged.connect(self.refresh_menu)
+        self.selectionModel().selectionChanged.connect(
+            # We need this because selected_rows is cached
+            self.selected_rows.cache_clear
+        )
 
     def setup_menu(self):
-        """Setup context menu"""
-        resize_action = create_action(self, _("Resize rows to contents"),
-                                      icon=ima.icon('collapse_row'),
-                                      triggered=self.resizeRowsToContents)
-        resize_columns_action = create_action(
-            self,
-            _("Resize columns to contents"),
+        """Setup actions and context menu"""
+        self.resize_action = self.create_action(
+            name=CollectionsEditorActions.ResizeRows,
+            text=_("Resize rows to contents"),
+            icon=ima.icon('collapse_row'),
+            triggered=self.resizeRowsToContents,
+            register_action=False
+        )
+        self.resize_columns_action = self.create_action(
+            name=CollectionsEditorActions.ResizeColumns,
+            text=_("Resize columns to contents"),
             icon=ima.icon('collapse_column'),
-            triggered=self.resize_column_contents)
-        self.paste_action = create_action(self, _("Paste"),
-                                          icon=ima.icon('editpaste'),
-                                          triggered=self.paste)
-        self.copy_action = create_action(self, _("Copy"),
-                                         icon=ima.icon('editcopy'),
-                                         triggered=self.copy)
-        self.edit_action = create_action(self, _("Edit"),
-                                         icon=ima.icon('edit'),
-                                         triggered=self.edit_item)
-        self.plot_action = create_action(
-            self, _("Plot"),
+            triggered=self.resize_column_contents,
+            register_action=False
+        )
+        self.paste_action = self.create_action(
+            name=CollectionsEditorActions.ResizeRows,
+            text=_("Paste"),
+            icon=ima.icon('editpaste'),
+            triggered=self.paste,
+            register_action=False
+        )
+        self.copy_action = self.create_action(
+            name=CollectionsEditorActions.Copy,
+            text=_("Copy"),
+            icon=ima.icon('editcopy'),
+            triggered=self.copy,
+            register_action=False
+        )
+        self.edit_action = self.create_action(
+            name=CollectionsEditorActions.Edit,
+            text=_("Edit"),
+            icon=ima.icon('edit'),
+            triggered=self.edit_item,
+            register_action=False
+        )
+        self.plot_action = self.create_action(
+            name=CollectionsEditorActions.Plot,
+            text=_("Plot"),
             icon=ima.icon('plot'),
-            triggered=lambda: self.plot_item('plot')
+            triggered=lambda: self.plot_item('plot'),
+            register_action=False
         )
         self.plot_action.setVisible(False)
-        self.hist_action = create_action(
-            self, _("Histogram"),
+        self.hist_action = self.create_action(
+            name=CollectionsEditorActions.Histogram,
+            text=_("Histogram"),
             icon=ima.icon('hist'),
-            triggered=lambda: self.plot_item('hist')
+            triggered=lambda: self.plot_item('hist'),
+            register_action=False
         )
         self.hist_action.setVisible(False)
-        self.imshow_action = create_action(self, _("Show image"),
-                                           icon=ima.icon('imshow'),
-                                           triggered=self.imshow_item)
+        self.imshow_action = self.create_action(
+            name=CollectionsEditorActions.ShowImage,
+            text=_("Show image"),
+            icon=ima.icon('imshow'),
+            triggered=self.imshow_item,
+            register_action=False
+        )
         self.imshow_action.setVisible(False)
-        self.save_array_action = create_action(self, _("Save array"),
-                                               icon=ima.icon('filesave'),
-                                               triggered=self.save_array)
+        self.save_array_action = self.create_action(
+            name=CollectionsEditorActions.Save,
+            text=_("Save"),
+            icon=ima.icon('filesave'),
+            triggered=self.save_array,
+            register_action=False
+        )
         self.save_array_action.setVisible(False)
-        self.insert_action = create_action(
-            self, _("Insert"),
+        self.insert_action = self.create_action(
+            name=CollectionsEditorActions.Insert,
+            text=_("Insert"),
             icon=ima.icon('insert'),
-            triggered=lambda: self.insert_item(below=False)
+            triggered=lambda: self.insert_item(below=False),
+            register_action=False
         )
-        self.insert_action_above = create_action(
-            self, _("Insert above"),
+        self.insert_action_above = self.create_action(
+            name=CollectionsEditorActions.InsertAbove,
+            text=_("Insert above"),
             icon=ima.icon('insert_above'),
-            triggered=lambda: self.insert_item(below=False)
+            triggered=lambda: self.insert_item(below=False),
+            register_action=False
         )
-        self.insert_action_below = create_action(
-            self, _("Insert below"),
+        self.insert_action_below = self.create_action(
+            name=CollectionsEditorActions.InsertBelow,
+            text=_("Insert below"),
             icon=ima.icon('insert_below'),
-            triggered=lambda: self.insert_item(below=True)
+            triggered=lambda: self.insert_item(below=True),
+            register_action=False
         )
-        self.remove_action = create_action(self, _("Remove"),
-                                           icon=ima.icon('editdelete'),
-                                           triggered=self.remove_item)
-        self.rename_action = create_action(self, _("Rename"),
-                                           icon=ima.icon('rename'),
-                                           triggered=self.rename_item)
-        self.duplicate_action = create_action(self, _("Duplicate"),
-                                              icon=ima.icon('edit_add'),
-                                              triggered=self.duplicate_item)
-        self.view_action = create_action(
-            self,
-            _("View with the Object Explorer"),
+        self.remove_action = self.create_action(
+            name=CollectionsEditorActions.Remove,
+            text=_("Remove"),
+            icon=ima.icon('editdelete'),
+            triggered=self.remove_item,
+            register_action=False
+        )
+        self.rename_action = self.create_action(
+            name=CollectionsEditorActions.Rename,
+            text=_("Rename"),
+            icon=ima.icon('rename'),
+            triggered=self.rename_item,
+            register_action=False
+        )
+        self.duplicate_action = self.create_action(
+            name=CollectionsEditorActions.Duplicate,
+            text=_("Duplicate"),
+            icon=ima.icon('edit_add'),
+            triggered=self.duplicate_item,
+            register_action=False
+        )
+        self.view_action = self.create_action(
+            name=CollectionsEditorActions.ViewObject,
+            text=_("View with the Object Explorer"),
             icon=ima.icon('outline_explorer'),
-            triggered=self.view_item)
-
-        menu = QMenu(self)
-        self.menu_actions = [
-            self.edit_action,
-            self.copy_action,
-            self.paste_action,
-            self.rename_action,
-            self.remove_action,
-            self.save_array_action,
-            MENU_SEPARATOR,
-            self.insert_action,
-            self.insert_action_above,
-            self.insert_action_below,
-            self.duplicate_action,
-            MENU_SEPARATOR,
-            self.view_action,
-            self.plot_action,
-            self.hist_action,
-            self.imshow_action,
-            MENU_SEPARATOR,
-            resize_action,
-            resize_columns_action
-        ]
-        add_actions(menu, self.menu_actions)
-
-        self.empty_ws_menu = QMenu(self)
-        add_actions(
-            self.empty_ws_menu,
-            [self.insert_action, self.paste_action]
+            triggered=self.view_item,
+            register_action=False
         )
+
+        menu = self.create_menu(
+            CollectionsEditorMenus.Context,
+            register=False
+        )
+
+        for action in [self.copy_action, self.paste_action, self.rename_action,
+                       self.edit_action, self.save_array_action]:
+            self.add_item_to_menu(
+                action,
+                menu,
+                section=CollectionsEditorContextMenuSections.Edit
+            )
+
+        for action in [self.insert_action, self.insert_action_above,
+                       self.insert_action_below, self.duplicate_action,
+                       self.remove_action]:
+            self.add_item_to_menu(
+                action,
+                menu,
+                section=CollectionsEditorContextMenuSections.AddRemove
+            )
+
+        for action in [self.view_action, self.plot_action,
+                       self.hist_action, self.imshow_action]:
+            self.add_item_to_menu(
+                action,
+                menu,
+                section=CollectionsEditorContextMenuSections.View
+            )
+
+        self.empty_ws_menu = self.create_menu(
+            CollectionsEditorMenus.ContextIfEmpty,
+            register=False
+        )
+
+        for action in [self.insert_action, self.paste_action]:
+            self.add_item_to_menu(action, self.empty_ws_menu)
 
         return menu
 
@@ -760,6 +984,10 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
 
     def get_len(self, key):
         """Return sequence length"""
+        raise NotImplementedError
+
+    def is_data_frame(self, key):
+        """Return True if variable is a pandas dataframe"""
         raise NotImplementedError
 
     def is_array(self, key):
@@ -816,7 +1044,7 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
 
         # Enable/disable actions
         condition_edit = (
-            (not isinstance(data, (tuple, set))) and
+            (not isinstance(data, (tuple, set, frozenset))) and
             index.isValid() and
             (len(self.selectedIndexes()) > 0) and
             indexes_in_same_row() and
@@ -841,7 +1069,7 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         self.copy_action.setEnabled(condition_select)
 
         condition_remove = (
-            (not isinstance(data, (tuple, set))) and
+            (not isinstance(data, (tuple, set, frozenset))) and
             index.isValid() and
             (len(self.selectedIndexes()) > 0) and
             not self.readonly
@@ -861,7 +1089,10 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
                 key = self.source_model.get_key(index)
             is_list = self.is_list(key)
             is_array = self.is_array(key) and self.get_len(key) != 0
-            condition_plot = (is_array and len(self.get_array_shape(key)) <= 2)
+            is_dataframe = self.is_data_frame(key) and self.get_len(key) != 0
+            condition_plot = (
+                is_array and len(self.get_array_shape(key)) <= 2
+            ) or is_dataframe
             condition_hist = (is_array and self.get_array_ndim(key) == 1)
             condition_imshow = condition_plot and self.get_array_ndim(key) == 2
             condition_imshow = condition_imshow or self.is_image(key)
@@ -899,43 +1130,74 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         if data is not None:
             self.source_model.set_data(data, self.dictfilter)
             self.source_model.reset()
-            self.sortByColumn(0, Qt.AscendingOrder)
+
+            # Sort table using current sort column and order
+            self.setSortingEnabled(True)
+
+    def _edit_value(self):
+        self.edit(self.__index_clicked)
+
+    def _update_hovered_row(self, event):
+        current_index = self.indexAt(event.pos())
+        if current_index.isValid():
+            self.hovered_row = current_index.row()
+            self.viewport().update()
+        else:
+            self.hovered_row = -1
 
     def mousePressEvent(self, event):
         """Reimplement Qt method"""
-        if event.button() != Qt.LeftButton:
+        if event.button() != Qt.LeftButton or self.over_select_row_button:
             QTableView.mousePressEvent(self, event)
             return
+
         index_clicked = self.indexAt(event.pos())
         if index_clicked.isValid():
-            if index_clicked == self.currentIndex() \
-               and index_clicked in self.selectedIndexes():
+            if (
+                index_clicked == self.currentIndex()
+                and index_clicked in self.selectedIndexes()
+            ):
                 self.clearSelection()
             else:
                 row = index_clicked.row()
                 # TODO: Remove hard coded "Value" column number (3 here)
-                index_clicked = index_clicked.child(row, 3)
-                self.edit(index_clicked)
-                QTableView.mousePressEvent(self, event)
+                self.__index_clicked = self.model().index(row, 3)
+
+                # Wait for a bit to edit values so dialogs are focused on
+                # double clicks. That will preserve the way things worked in
+                # Spyder 5 for users that are accustomed to do double clicks.
+                self._edit_value_timer.start()
         else:
             self.clearSelection()
             event.accept()
 
     def mouseDoubleClickEvent(self, event):
         """Reimplement Qt method"""
-        index_clicked = self.indexAt(event.pos())
-        if index_clicked.isValid():
-            row = index_clicked.row()
-            # TODO: Remove hard coded "Value" column number (3 here)
-            index_clicked = index_clicked.child(row, 3)
-            self.edit(index_clicked)
-        else:
-            event.accept()
+        # Make this event do nothing because variables are now edited with a
+        # single click.
+        pass
 
     def mouseMoveEvent(self, event):
-        """Change cursor shape."""
+        """Actions to take when the mouse moves over the widget."""
+        self.over_select_row_button = False
+        self._update_hovered_row(event)
+
         if self.rowAt(event.y()) != -1:
-            self.setCursor(Qt.PointingHandCursor)
+            # The +3 here is necessary to avoid mismatches when trying to click
+            # the button in a position too close to its left border.
+            select_row_button_width = SELECT_ROW_BUTTON_SIZE + 3
+
+            # Include scrollbar width when computing the select row button
+            # width
+            if self.verticalScrollBar().isVisible():
+                select_row_button_width += self.verticalScrollBar().width()
+
+            # Decide if the cursor is on top of the select row button
+            if (self.width() - event.x()) < select_row_button_width:
+                self.over_select_row_button = True
+                self.setCursor(Qt.ArrowCursor)
+            else:
+                self.setCursor(Qt.PointingHandCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
 
@@ -987,6 +1249,16 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         else:
             event.ignore()
 
+    def leaveEvent(self, event):
+        """Actions to take when the mouse leaves the widget."""
+        self.hovered_row = -1
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event):
+        """Actions to take on mouse wheel."""
+        self._update_hovered_row(event)
+        super().wheelEvent(event)
+
     def showEvent(self, event):
         """Resize columns when the widget is shown."""
         # This is probably the best we can do to adjust the columns width to
@@ -1021,7 +1293,7 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         if not index.isValid():
             return
         # TODO: Remove hard coded "Value" column number (3 here)
-        self.edit(index.child(index.row(), 3))
+        self.edit(self.model().index(index.row(), 3))
 
     @Slot()
     def remove_item(self, force=False):
@@ -1037,13 +1309,25 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
                 return
 
         if not force:
-            one = _("Do you want to remove the selected item?")
-            more = _("Do you want to remove all selected items?")
-            answer = QMessageBox.question(self, _("Remove"),
-                                          one if len(indexes) == 1 else more,
-                                          QMessageBox.Yes | QMessageBox.No)
+            if not self.get_conf('show_remove_message_collections'):
+                result = QMessageBox.Yes
+            else:
+                one = _("Do you want to remove the selected item?")
+                more = _("Do you want to remove all selected items?")
+                answer = MessageCheckBox(
+                    icon=QMessageBox.Question, parent=self
+                )
+                answer.set_checkbox_text(_("Don't ask again."))
+                answer.set_checked(False)
+                answer.set_check_visible(True)
+                answer.setText(one if len(indexes) == 1 else more)
+                answer.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                result = answer.exec_()
+                check = answer.is_checked()
+                if check:
+                    self.set_conf('show_remove_message_collections', False)
 
-        if force or answer == QMessageBox.Yes:
+        if force or result == QMessageBox.Yes:
             if self.proxy_model:
                 idx_rows = unsorted_unique(
                     [self.proxy_model.mapToSource(idx).row()
@@ -1092,7 +1376,7 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
             field_text = _('Variable name:')
 
         data = self.source_model.get_data()
-        if isinstance(data, (list, set)):
+        if isinstance(data, (list, set, frozenset)):
             new_key, valid = len(data), True
         elif new_name is not None:
             new_key, valid = new_name, True
@@ -1100,8 +1384,8 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
             new_key, valid = QInputDialog.getText(self, title, field_text,
                                                   QLineEdit.Normal, orig_key)
 
-        if valid and to_text_string(new_key):
-            new_key = try_to_eval(to_text_string(new_key))
+        if valid and str(new_key):
+            new_key = try_to_eval(str(new_key))
             if new_key == orig_key:
                 return
             self.copy_value(orig_key, new_key)
@@ -1118,6 +1402,8 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
     @Slot()
     def rename_item(self, new_name=None):
         """Rename item"""
+        if isinstance(new_name, bool):
+            new_name = None
         self.copy_item(erase_original=True, new_name=new_name)
 
     @Slot()
@@ -1145,8 +1431,8 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         elif isinstance(data, dict):
             key, valid = QInputDialog.getText(self, _('Insert'), _('Key:'),
                                               QLineEdit.Normal)
-            if valid and to_text_string(key):
-                key = try_to_eval(to_text_string(key))
+            if valid and str(key):
+                key = try_to_eval(str(key))
             else:
                 return
         else:
@@ -1155,8 +1441,8 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         value, valid = QInputDialog.getText(self, _('Insert'), _('Value:'),
                                             QLineEdit.Normal)
 
-        if valid and to_text_string(value):
-            self.new_value(key, try_to_eval(to_text_string(value)))
+        if valid and str(value):
+            self.new_value(key, try_to_eval(str(value)))
 
     @Slot()
     def view_item(self):
@@ -1165,7 +1451,7 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         if not index.isValid():
             return
         # TODO: Remove hard coded "Value" column number (3 here)
-        index = index.child(index.row(), 3)
+        index = index.model().index(index.row(), 3)
         self.delegate.createEditor(self, None, index, object_explorer=True)
 
     def __prepare_plot(self):
@@ -1245,13 +1531,32 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
 
     @Slot()
     def copy(self):
-        """Copy text to clipboard"""
+        """
+        Copy text representation of objects to clipboard.
+
+        Notes
+        -----
+        For Numpy arrays and dataframes we try to get a better representation
+        by using their `savetxt` and `to_csv` methods, respectively.
+        """
         clipboard = QApplication.clipboard()
         clipl = []
+        retrieve_failed = False
+        array_failed = False
+        dataframe_failed = False
+
         for idx in self.selectedIndexes():
             if not idx.isValid():
                 continue
-            obj = self.delegate.get_value(idx)
+
+            # Prevent error when it's not possible to get the object's value
+            # Fixes spyder-ide/spyder#12913
+            try:
+                obj = self.delegate.get_value(idx)
+            except Exception:
+                retrieve_failed = True
+                continue
+
             # Check if we are trying to copy a numpy array, and if so make sure
             # to copy the whole thing in a tab separated format
             if (isinstance(obj, (np.ndarray, np.ma.MaskedArray)) and
@@ -1260,10 +1565,8 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
                 try:
                     np.savetxt(output, obj, delimiter='\t')
                 except Exception:
-                    QMessageBox.warning(self, _("Warning"),
-                                        _("It was not possible to copy "
-                                          "this array"))
-                    return
+                    array_failed = True
+                    continue
                 obj = output.getvalue().decode('utf-8')
                 output.close()
             elif (isinstance(obj, (pd.DataFrame, pd.Series)) and
@@ -1272,18 +1575,59 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
                 try:
                     obj.to_csv(output, sep='\t', index=True, header=True)
                 except Exception:
-                    QMessageBox.warning(self, _("Warning"),
-                                        _("It was not possible to copy "
-                                          "this dataframe"))
-                    return
+                    dataframe_failed = True
+                    continue
                 obj = output.getvalue()
                 output.close()
-            elif is_binary_string(obj):
-                obj = to_text_string(obj, 'utf8')
+            elif isinstance(obj, bytes):
+                obj = str(obj, 'utf8')
             else:
-                obj = to_text_string(obj)
+                obj = str(obj)
+
             clipl.append(obj)
+
+        # Copy to clipboard the final result
         clipboard.setText('\n'.join(clipl))
+
+        # Show appropriate error messages after we tried to copy all objects
+        # selected by users.
+        if retrieve_failed:
+            QMessageBox.warning(
+                self.parent(),
+                _("Warning"),
+                _(
+                    "It was not possible to retrieve the value of one or more "
+                    "of the variables you selected in order to copy them."
+                ),
+            )
+
+        if array_failed and dataframe_failed:
+            QMessageBox.warning(
+                self,
+                _("Warning"),
+                _(
+                    "It was not possible to copy one or more of the "
+                    "dataframes and Numpy arrays you selected"
+                ),
+            )
+        elif array_failed:
+            QMessageBox.warning(
+                self,
+                _("Warning"),
+                _(
+                    "It was not possible to copy one or more of the "
+                    "Numpy arrays you selected"
+                ),
+            )
+        elif dataframe_failed:
+            QMessageBox.warning(
+                self,
+                _("Warning"),
+                _(
+                    "It was not possible to copy one or more of the "
+                    "dataframes you selected"
+                ),
+            )
 
     def import_from_string(self, text, title=None):
         """Import data from string"""
@@ -1304,23 +1648,39 @@ class BaseTableView(QTableView, SpyderConfigurationAccessor):
         clipboard = QApplication.clipboard()
         cliptext = ''
         if clipboard.mimeData().hasText():
-            cliptext = to_text_string(clipboard.text())
+            cliptext = str(clipboard.text())
         if cliptext.strip():
             self.import_from_string(cliptext, title=_("Import from clipboard"))
         else:
             QMessageBox.warning(self, _( "Empty clipboard"),
                                 _("Nothing to be imported from clipboard."))
 
+    @lru_cache(maxsize=1)
+    def selected_rows(self):
+        """
+        Get the rows currently selected.
+
+        Notes
+        -----
+        The result of this function is cached because it's called in the paint
+        method of CollectionsDelegate. So, we need it to run as quickly as
+        possible.
+        """
+        return {
+            index.row() for index in self.selectionModel().selectedRows()
+        }
+
 
 class CollectionsEditorTableView(BaseTableView):
     """CollectionsEditor table view"""
 
-    def __init__(self, parent, data, namespacebrowser=None, readonly=False,
-                 title="", names=False):
+    def __init__(self, parent, data, namespacebrowser=None,
+                 data_function: Optional[Callable[[], Any]] = None,
+                 readonly=False, title="", names=False):
         BaseTableView.__init__(self, parent)
         self.dictfilter = None
         self.namespacebrowser = namespacebrowser
-        self.readonly = readonly or isinstance(data, (tuple, set))
+        self.readonly = readonly or isinstance(data, (tuple, set, frozenset))
         CollectionsModelClass = (ReadOnlyCollectionsModel if self.readonly
                                  else CollectionsModel)
         self.source_model = CollectionsModelClass(
@@ -1330,14 +1690,23 @@ class CollectionsEditorTableView(BaseTableView):
             names=names,
             minmax=self.get_conf('minmax')
         )
-        self.model = self.source_model
         self.setModel(self.source_model)
-        self.delegate = CollectionsDelegate(self, namespacebrowser)
+        self.delegate = CollectionsDelegate(
+            self, namespacebrowser, data_function
+        )
         self.setItemDelegate(self.delegate)
 
         self.setup_table()
         self.menu = self.setup_menu()
-        if isinstance(data, set):
+
+        # Leave unsorted if dict, sort by column 0 otherwise
+        if isinstance(data, dict):
+            self.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        else:
+            self.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
+        self.setSortingEnabled(True)
+
+        if isinstance(data, (set, frozenset)):
             self.horizontalHeader().hideSection(0)
 
     #------ Remote/local API --------------------------------------------------
@@ -1353,7 +1722,7 @@ class CollectionsEditorTableView(BaseTableView):
         data = self.source_model.get_data()
         if isinstance(data, list):
             data.append(data[orig_key])
-        if isinstance(data, set):
+        if isinstance(data, (set, frozenset)):
             data.add(data[orig_key])
         else:
             data[new_key] = data[orig_key]
@@ -1373,9 +1742,9 @@ class CollectionsEditorTableView(BaseTableView):
         return isinstance(data[key], (tuple, list))
 
     def is_set(self, key):
-        """Return True if variable is a set"""
+        """Return True if variable is a set or a frozenset"""
         data = self.source_model.get_data()
-        return isinstance(data[key], set)
+        return isinstance(data[key], (set, frozenset))
 
     def get_len(self, key):
         """Return sequence length"""
@@ -1384,6 +1753,11 @@ class CollectionsEditorTableView(BaseTableView):
             return self.get_array_ndim(key)
         else:
             return len(data[key])
+
+    def is_data_frame(self, key):
+        """Return True if variable is a pandas dataframe"""
+        data = self.source_model.get_data()
+        return isinstance(data[key], pd.DataFrame)
 
     def is_array(self, key):
         """Return True if variable is a numpy array"""
@@ -1419,8 +1793,12 @@ class CollectionsEditorTableView(BaseTableView):
 
     def plot(self, key, funcname):
         """Plot item"""
-        data = self.source_model.get_data()
-        self.namespacebrowser.plot(data[key], funcname)
+        def plot_function(figure):
+            ax = figure.subplots()
+            getattr(ax, funcname)(data)
+
+        data = self.source_model.get_data()[key]
+        self.namespacebrowser.plot(plot_function)
 
     def imshow(self, key):
         """Show item's image"""
@@ -1441,29 +1819,111 @@ class CollectionsEditorTableView(BaseTableView):
         self.dictfilter = dictfilter
 
 
-class CollectionsEditorWidget(QWidget):
+class CollectionsEditorWidget(QWidget, SpyderWidgetMixin):
     """Dictionary Editor Widget"""
+    # Dummy conf section to avoid a warning from SpyderConfigurationObserver
+    CONF_SECTION = "variable_explorer"
 
-    def __init__(self, parent, data, namespacebrowser=None, readonly=False,
-                 title="", remote=False):
+    sig_refresh_requested = Signal()
+
+    def __init__(self, parent, data, namespacebrowser=None,
+                 data_function: Optional[Callable[[], Any]] = None,
+                 readonly=False, title="", remote=False):
         QWidget.__init__(self, parent)
         if remote:
             self.editor = RemoteCollectionsEditorTableView(
-                self, data, readonly)
+                self, data, readonly, create_menu=True)
         else:
             self.editor = CollectionsEditorTableView(
-                self, data, namespacebrowser, readonly, title)
+                self, data, namespacebrowser, data_function, readonly, title
+            )
 
-        toolbar = SpyderToolbar(parent=None, title='Editor toolbar')
-        toolbar.setStyleSheet(str(PANES_TOOLBAR_STYLESHEET))
+        self.refresh_action = self.create_action(
+            name=CollectionsEditorActions.Refresh,
+            text=_('Refresh'),
+            icon=ima.icon('refresh'),
+            tip=_('Refresh editor with current value of variable in console'),
+            triggered=lambda: self.sig_refresh_requested.emit(),
+            register_action=None
+        )
 
-        for item in self.editor.menu_actions:
-            if item is not None:
-                toolbar.addAction(item)
+        self.close_action = self.create_action(
+            name=CollectionsEditorActions.Close,
+            icon=self.create_icon('close_pane'),
+            text=_('Close'),
+            triggered=self.close_window,
+            shortcut=self.get_shortcut(CollectionsEditorActions.Close),
+            register_action=False,
+            register_shortcut=True
+        )
+        self.register_shortcut_for_widget(
+            name='close', triggered=self.close_window
+        )
+
+        toolbar = self.create_toolbar(
+            CollectionsEditorWidgets.Toolbar,
+            register=False
+        )
+
+        stretcher = self.create_stretcher(
+            CollectionsEditorWidgets.ToolbarStretcher
+        )
+
+        for item in [
+            self.editor.insert_action,
+            self.editor.insert_action_above,
+            self.editor.insert_action_below,
+            self.editor.duplicate_action,
+            self.editor.remove_action
+        ]:
+            self.add_item_to_toolbar(
+                item,
+                toolbar,
+                section=CollectionsEditorToolbarSections.AddDelete
+            )
+
+        options_menu = self.create_menu(
+            CollectionsEditorMenus.Options,
+            register=False
+        )
+        for item in [self.close_action]:
+            self.add_item_to_menu(item, options_menu)
+
+        options_button = self.create_toolbutton(
+            name=CollectionsEditorWidgets.OptionsToolButton,
+            text=_('Options'),
+            icon=ima.icon('tooloptions'),
+            register=False
+        )
+        options_button.setPopupMode(QToolButton.InstantPopup)
+        options_button.setMenu(options_menu)
+
+        for item in [
+            self.editor.view_action,
+            self.editor.plot_action,
+            self.editor.hist_action,
+            self.editor.imshow_action,
+            stretcher,
+            self.editor.resize_action,
+            self.editor.resize_columns_action,
+            self.refresh_action,
+            options_button
+        ]:
+            self.add_item_to_toolbar(
+                item,
+                toolbar,
+                section=CollectionsEditorToolbarSections.ViewAndRest
+            )
+
+        toolbar.render()
 
         # Update the toolbar actions state
         self.editor.refresh_menu()
+        self.refresh_action.setEnabled(data_function is not None)
+
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(toolbar)
         layout.addWidget(self.editor)
         self.setLayout(layout)
@@ -1476,11 +1936,20 @@ class CollectionsEditorWidget(QWidget):
         """Get model title"""
         return self.editor.source_model.title
 
+    def close_window(self):
+        if self.parent():
+            self.parent().reject()
+
 
 class CollectionsEditor(BaseDialog):
     """Collections Editor Dialog"""
 
-    def __init__(self, parent=None, namespacebrowser=None):
+    def __init__(
+        self,
+        parent=None,
+        namespacebrowser=None,
+        data_function: Optional[Callable[[], Any]] = None,
+    ):
         super().__init__(parent)
 
         # Destroying the C++ object right after closing the dialog box,
@@ -1490,15 +1959,27 @@ class CollectionsEditor(BaseDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         self.namespacebrowser = namespacebrowser
+        self.data_function = data_function
         self.data_copy = None
         self.widget = None
         self.btn_save_and_close = None
         self.btn_close = None
+        self.stacked_widget = None
+        self.loading_pane = None
 
-    def setup(self, data, title='', readonly=False, remote=False,
-              icon=None, parent=None):
+    def setup(
+        self,
+        data,
+        title='',
+        readonly=False,
+        remote=False,
+        icon=None,
+        parent=None,
+        loading_msg=None,
+        loading_img=None,
+    ):
         """Setup editor."""
-        if isinstance(data, (dict, set)):
+        if isinstance(data, (dict, set, frozenset)):
             # dictionary, set
             self.data_copy = data.copy()
         elif isinstance(data, (tuple, list)):
@@ -1517,21 +1998,19 @@ class CollectionsEditor(BaseDialog):
 
         # If the copy has a different type, then do not allow editing, because
         # this would change the type after saving; cf. spyder-ide/spyder#6936.
-        if type(self.data_copy) != type(data):
+        if not isinstance(self.data_copy, type(data)):
             readonly = True
 
         self.widget = CollectionsEditorWidget(
-            self, self.data_copy, self.namespacebrowser, title=title,
-            readonly=readonly, remote=remote)
+            self, self.data_copy, self.namespacebrowser, self.data_function,
+            title=title, readonly=readonly, remote=remote
+        )
+        self.widget.sig_refresh_requested.connect(self.refresh_editor)
         self.widget.editor.source_model.sig_setting_data.connect(
             self.save_and_close_enable)
-        layout = QVBoxLayout()
-        layout.addWidget(self.widget)
-        self.setLayout(layout)
 
         # Buttons configuration
         btn_layout = QHBoxLayout()
-        btn_layout.setContentsMargins(4, 4, 4, 4)
         btn_layout.addStretch()
 
         if not readonly:
@@ -1546,7 +2025,32 @@ class CollectionsEditor(BaseDialog):
         self.btn_close.clicked.connect(self.reject)
         btn_layout.addWidget(self.btn_close)
 
+        # Create a QStackedWidget
+        self.stacked_widget = QStackedWidget()
+        self.stacked_widget.addWidget(self.widget)
+
+        # Create a loading message
+        if loading_msg and loading_img:
+            self.loading_pane = EmptyMessageWidget(
+                parent=self,
+                icon_filename=loading_img,
+                text=loading_msg,
+                bottom_stretch=1,
+                spinner=True,
+            )
+            self.stacked_widget.addWidget(self.loading_pane)
+
+            # Make sure the loading label is the one shown initially
+            self.stacked_widget.setCurrentWidget(self.loading_pane)
+        else:
+            self.stacked_widget.setCurrentWidget(self.widget)
+
+        # CollectionEditor widget layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.stacked_widget)
+        layout.addSpacing((-1 if MAC else 2) * AppStyle.MarginSize)
         layout.addLayout(btn_layout)
+        self.setLayout(layout)
 
         self.setWindowTitle(self.widget.get_title())
         if icon is None:
@@ -1573,6 +2077,51 @@ class CollectionsEditor(BaseDialog):
         # already been destroyed, due to the Qt.WA_DeleteOnClose attribute
         return self.data_copy
 
+    def refresh_editor(self) -> None:
+        """
+        Refresh data in editor.
+        """
+        assert self.data_function is not None
+
+        if self.btn_save_and_close and self.btn_save_and_close.isEnabled():
+            if not self.ask_for_refresh_confirmation():
+                return
+
+        try:
+            new_value = self.data_function()
+        except (IndexError, KeyError):
+            QMessageBox.critical(
+                self,
+                _('Collection editor'),
+                _('The variable no longer exists.')
+            )
+            self.reject()
+            return
+
+        self.widget.set_data(new_value)
+        self.data_copy = new_value
+        if self.btn_save_and_close:
+            self.btn_save_and_close.setEnabled(False)
+        self.btn_close.setAutoDefault(True)
+        self.btn_close.setDefault(True)
+
+    def ask_for_refresh_confirmation(self) -> bool:
+        """
+        Ask user to confirm refreshing the editor.
+
+        This function is to be called if refreshing the editor would overwrite
+        changes that the user made previously. The function returns True if
+        the user confirms that they want to refresh and False otherwise.
+        """
+        message = _('Refreshing the editor will overwrite the changes that '
+                    'you made. Do you want to proceed?')
+        result = QMessageBox.question(
+            self,
+            _('Refresh collections editor?'),
+            message
+        )
+        return result == QMessageBox.Yes
+
 
 #==============================================================================
 # Remote versions of CollectionsDelegate and CollectionsEditorTableView
@@ -1595,6 +2144,38 @@ class RemoteCollectionsDelegate(CollectionsDelegate):
             name = source_index.model().keys[source_index.row()]
             self.parent().new_value(name, value)
 
+    def make_data_function(
+        self,
+        index: QModelIndex
+    ) -> Optional[Callable[[], Any]]:
+        """
+        Construct function which returns current value of data.
+
+        The returned function uses the associated console to retrieve the
+        current value of the variable. This is used to refresh editors created
+        from that variable.
+
+        Parameters
+        ----------
+        index : QModelIndex
+            Index of item whose current value is to be returned by the
+            function constructed here.
+
+        Returns
+        -------
+        Optional[Callable[[], Any]]
+            Function which returns the current value of the data, or None if
+            such a function cannot be constructed.
+        """
+        source_index = index.model().mapToSource(index)
+        name = source_index.model().keys[source_index.row()]
+        parent = self.parent()
+
+        def get_data():
+            return parent.get_value(name)
+
+        return get_data
+
 
 class RemoteCollectionsEditorTableView(BaseTableView):
     """DictEditor table view"""
@@ -1607,7 +2188,6 @@ class RemoteCollectionsEditorTableView(BaseTableView):
         self.shellwidget = shellwidget
         self.var_properties = {}
         self.dictfilter = None
-        self.delegate = None
         self.readonly = False
 
         self.source_model = CollectionsModel(
@@ -1619,7 +2199,6 @@ class RemoteCollectionsEditorTableView(BaseTableView):
             self.source_model.load_all)
 
         self.proxy_model = CollectionsCustomSortFilterProxy(self)
-        self.model = self.proxy_model
 
         self.proxy_model.setSourceModel(self.source_model)
         self.proxy_model.setDynamicSortFilter(True)
@@ -1643,6 +2222,10 @@ class RemoteCollectionsEditorTableView(BaseTableView):
         if create_menu:
             self.menu = self.setup_menu()
 
+        # Sorting columns
+        self.setSortingEnabled(True)
+        self.sortByColumn(0, Qt.AscendingOrder)
+
     # ------ Remote/local API -------------------------------------------------
     def get_value(self, name):
         """Get the value of a variable"""
@@ -1654,8 +2237,7 @@ class RemoteCollectionsEditorTableView(BaseTableView):
         try:
             self.shellwidget.set_value(name, value)
         except TypeError as e:
-            QMessageBox.critical(self, _("Error"),
-                                 "TypeError: %s" % to_text_string(e))
+            QMessageBox.critical(self, _("Error"), "TypeError: %s" % str(e))
         self.namespacebrowser.refresh_namespacebrowser()
 
     def remove_values(self, names):
@@ -1807,8 +2389,8 @@ class CollectionsCustomSortFilterProxy(CustomSortFilterProxy):
         using to columns (name and type).
         """
         model = self.sourceModel()
-        name = to_text_string(model.row_key(row_num))
-        variable_type = to_text_string(model.row_type(row_num))
+        name = str(model.row_key(row_num))
+        variable_type = str(model.row_type(row_num))
         r_name = re.search(self.pattern, name)
         r_type = re.search(self.pattern, variable_type)
 
@@ -1842,8 +2424,7 @@ class CollectionsCustomSortFilterProxy(CustomSortFilterProxy):
 # =============================================================================
 def get_test_data():
     """Create test data."""
-    image = PIL.Image.fromarray(np.random.randint(256, size=(100, 100)),
-                                mode='P')
+    image = PIL.Image.fromarray(255 * np.random.rand(100, 100))
     testdict = {'d': 1, 'a': np.random.rand(10, 10), 'b': [1, 2]}
     testdate = datetime.date(1945, 5, 8)
     test_timedelta = datetime.timedelta(days=-1, minutes=42, seconds=13)
@@ -1858,7 +2439,7 @@ def get_test_data():
         test_pd_td = pd.Timedelta(days=2193, hours=12)
         test_dtindex = pd.date_range(start="1939-09-01T",
                                      end="1939-10-06",
-                                     freq="12H")
+                                     freq="12h")
         test_series = pd.Series({"series_name": [0, 1, 2, 3, 4, 5]})
         test_df = pd.DataFrame({"string_col": ["a", "b", "c", "d"],
                                 "int_col": [0, 1, 2, 3],
@@ -1875,8 +2456,8 @@ def get_test_data():
     foobar = Foobar()
     return {'object': foobar,
             'module': np,
-            'str': 'kjkj kj k j j kj k jkj',
-            'unicode': to_text_string('éù', 'utf-8'),
+            'bytes': b'kjkj kj k j j kj k jkj',
+            'str': 'éù',
             'list': [1, 3, [sorted, 5, 6], 'kjkj', None],
             'set': {1, 2, 1, 3, None, 'A', 'B', 'C', True, False},
             'tuple': ([1, testdate, testdict, test_timedelta], 'kjkj', None),
@@ -1909,10 +2490,10 @@ def get_test_data():
             'timedelta_pd': test_pd_td,
             'datetimeindex': test_dtindex,
             'series': test_series,
-            'ddataframe': test_df,
+            'dataframe': test_df,
             'None': None,
             'unsupported1': np.arccos,
-            'unsupported2': np.cast,
+            'unsupported2': np.asarray,
             # Test for spyder-ide/spyder#3518.
             'big_struct_array': np.zeros(1000, dtype=[('ID', 'f8'),
                                                       ('param1', 'f8', 5000)]),
@@ -1923,7 +2504,7 @@ def editor_test():
     """Test Collections editor."""
     dialog = CollectionsEditor()
     dialog.setup(get_test_data())
-    dialog.show()
+    dialog.exec_()
 
 
 def remote_editor_test():
@@ -1939,7 +2520,7 @@ def remote_editor_test():
     remote = make_remote_view(get_test_data(), settings)
     dialog = CollectionsEditor()
     dialog.setup(remote, remote=True)
-    dialog.show()
+    dialog.exec_()
 
 
 if __name__ == "__main__":
@@ -1948,4 +2529,3 @@ if __name__ == "__main__":
     app = qapplication()  # analysis:ignore
     editor_test()
     remote_editor_test()
-    app.exec_()

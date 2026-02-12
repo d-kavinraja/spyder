@@ -12,8 +12,7 @@ import stat
 from flaky import flaky
 import pytest
 
-from spyder.utils.encoding import is_text_file, get_coding, write
-from spyder.py3compat import to_text_string
+from spyder.utils.encoding import is_text_file, read, write
 
 __location__ = os.path.realpath(os.path.join(os.getcwd(),
                                              os.path.dirname(__file__)))
@@ -26,7 +25,7 @@ def test_symlinks(tmpdir):
     """
     base_dir = tmpdir.mkdir("symlinks")
     base_file = base_dir.join("symlinks_text.txt")
-    base_file_path = to_text_string(base_file)
+    base_file_path = str(base_file)
 
     # Write base file
     write("Some text for symlink", base_file_path)
@@ -35,7 +34,7 @@ def test_symlinks(tmpdir):
     symlink_file = pathlib.Path(base_dir.join(
         'link-to-symlinks_text.txt'))
     symlink_file.symlink_to(base_file_path)
-    symlink_file_path = to_text_string(symlink_file)
+    symlink_file_path = str(symlink_file)
 
     # Assert the symlink was created
     assert os.path.islink(symlink_file_path)
@@ -52,7 +51,7 @@ def test_symlinks(tmpdir):
 def test_permissions(tmpdir):
     """Check that file permissions are preserved."""
     p_file = tmpdir.mkdir("permissions").join("permissions_text.txt")
-    p_file = to_text_string(p_file)
+    p_file = str(p_file)
 
     # Write file and define execution permissions
     write("Some text", p_file)
@@ -73,7 +72,7 @@ def test_permissions(tmpdir):
 def test_timestamp(tmpdir):
     """Check that the modification timestamp is preserved."""
     tmp_file = tmpdir.mkdir("timestamp").join('test_file.txt')
-    tmp_file = to_text_string(tmp_file)
+    tmp_file = str(tmp_file)
 
     # Write a file
     write("Test text", tmp_file)
@@ -89,7 +88,7 @@ def test_timestamp(tmpdir):
 def test_is_text_file(tmpdir):
     p = tmpdir.mkdir("sub").join("random_text.txt")
     p.write("Some random text")
-    assert is_text_file(str(p)) == True
+    assert is_text_file(str(p)) is True
 
 
 @pytest.mark.parametrize(
@@ -99,11 +98,14 @@ def test_is_text_file(tmpdir):
      ('ascii', 'ascii.txt'),
      ('Big5', 'Big5.txt'),
      ('KOI8-R', 'KOI8-R.txt'),
+     ('iso-8859-1', 'copyright.txt'),
+     ('utf-8', 'copyright.py'),  # Python files are UTF-8 by default
+     ('iso8859-9', 'iso8859-9.py')  # Encoding declared in file
      ])
 def test_files_encodings(expected_encoding, text_file):
-    with open(os.path.join(__location__, text_file), 'rb') as f:
-        text = f.read()
-        assert get_coding(text).lower() == expected_encoding.lower()
+    file_path = os.path.join(__location__, text_file)
+    text, encoding = read(file_path)
+    assert encoding.lower() == expected_encoding.lower()
 
 
 if __name__ == '__main__':

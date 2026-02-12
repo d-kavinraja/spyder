@@ -13,38 +13,64 @@ import os
 import os.path as osp
 import subprocess
 import sys
+from typing import Dict, Optional, Tuple
 
 # Third party imports
 from qtpy.QtCore import Slot
-from qtpy.QtWidgets import QMenu
 
 # Local imports
-from spyder.api.plugins import Plugins, SpyderPluginV2
+from spyder.api.plugins import Plugins, SpyderDockablePlugin, SpyderPluginV2
 from spyder.api.translations import _
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
-from spyder.api.widgets.menus import MENU_SEPARATOR
-from spyder.config.base import (DEV, get_module_path, get_debug_level,
+from spyder.api.plugin_registration.registry import PLUGIN_REGISTRY
+from spyder.api.widgets.menus import SpyderMenu, MENU_SEPARATOR
+from spyder.app import SHORTCUT_EXE
+from spyder.config.base import (get_module_path, get_debug_level,
                                 running_under_pytest)
 from spyder.plugins.application.confpage import ApplicationConfigPage
 from spyder.plugins.application.container import (
     ApplicationActions, ApplicationContainer, ApplicationPluginMenus)
 from spyder.plugins.console.api import ConsoleActions
+from spyder.plugins.editor.api.actions import EditorWidgetActions
 from spyder.plugins.mainmenu.api import (
-    ApplicationMenus, FileMenuSections, HelpMenuSections, ToolsMenuSections)
+    ApplicationMenus,
+    EditMenuSections,
+    FileMenuSections,
+    HelpMenuSections,
+    SearchMenuSections,
+    ToolsMenuSections,
+)
+from spyder.plugins.toolbar.api import ApplicationToolbars
+from spyder.utils.misc import getcwd_or_home
 from spyder.utils.qthelpers import add_actions
 
 
 class Application(SpyderPluginV2):
     NAME = 'application'
     REQUIRES = [Plugins.Console, Plugins.Preferences]
-    OPTIONAL = [Plugins.Help, Plugins.MainMenu, Plugins.Shortcuts,
-                Plugins.Editor, Plugins.StatusBar]
+    OPTIONAL = [
+        Plugins.Editor,
+        Plugins.Help,
+        Plugins.IPythonConsole,
+        Plugins.MainMenu,
+        Plugins.StatusBar,
+        Plugins.Shortcuts,  # Needed to display the app context menu
+        Plugins.Toolbar,
+        Plugins.UpdateManager,  # Required in the confpage
+    ]
     CONTAINER_CLASS = ApplicationContainer
     CONF_SECTION = 'main'
     CONF_FILE = False
     CONF_WIDGET_CLASS = ApplicationConfigPage
     CAN_BE_DISABLED = False
+
+    def __init__(self, parent, configuration=None):
+        super().__init__(parent, configuration)
+        self.focused_plugin: Optional[SpyderDockablePlugin] = None
+        self.file_action_enabled: Dict[Tuple[str, str], bool] = {}
+        self.edit_action_enabled: Dict[Tuple[str, str], bool] = {}
+        self.search_action_enabled: Dict[Tuple[str, str], bool] = {}
 
     @staticmethod
     def get_name():
@@ -61,11 +87,40 @@ class Application(SpyderPluginV2):
     def on_initialize(self):
         container = self.get_container()
         container.sig_report_issue_requested.connect(self.report_issue)
+        container.sig_new_file_requested.connect(self.create_new_file)
+        container.sig_open_file_in_plugin_requested.connect(
+            self.open_file_in_plugin
+        )
+        container.sig_open_file_using_dialog_requested.connect(
+            self.open_file_using_dialog
+        )
+        container.sig_open_last_closed_requested.connect(
+            self.open_last_closed_file
+        )
+        container.sig_save_file_requested.connect(self.save_file)
+        container.sig_save_all_requested.connect(self.save_all)
+        container.sig_save_file_as_requested.connect(self.save_file_as)
+        container.sig_save_copy_as_requested.connect(self.save_copy_as)
+        container.sig_revert_file_requested.connect(self.revert_file)
+        container.sig_close_file_requested.connect(self.close_file)
+        container.sig_close_all_requested.connect(self.close_all)
+        container.sig_undo_requested.connect(self.undo)
+        container.sig_redo_requested.connect(self.redo)
+        container.sig_cut_requested.connect(self.cut)
+        container.sig_copy_requested.connect(self.copy)
+        container.sig_paste_requested.connect(self.paste)
+        container.sig_select_all_requested.connect(self.select_all)
+        container.sig_find_requested.connect(self.find)
+        container.sig_find_next_requested.connect(self.find_next)
+        container.sig_find_previous_requested.connect(self.find_previous)
+        container.sig_replace_requested.connect(self.replace)
         container.set_window(self._window)
+        self.sig_focused_plugin_changed.connect(self._update_focused_plugin)
 
-    # --------------------- PLUGIN INITIALIZATION -----------------------------
-    @on_plugin_available(plugin=Plugins.Shortcuts)
-    def on_shortcuts_available(self):
+    # ---- Plugin initialization
+    # -------------------------------------------------------------------------
+    @on_plugin_available(plugin=Plugins.IPythonConsole)
+    def on_ipythonconsole_available(self):
         if self.is_plugin_available(Plugins.MainMenu):
             self._populate_help_menu()
 
@@ -83,10 +138,12 @@ class Application(SpyderPluginV2):
     @on_plugin_available(plugin=Plugins.MainMenu)
     def on_main_menu_available(self):
         self._populate_file_menu()
+        self._populate_edit_menu()
+        self._populate_search_menu()
         self._populate_tools_menu()
 
-        if self.is_plugin_enabled(Plugins.Shortcuts):
-            if self.is_plugin_available(Plugins.Shortcuts):
+        if self.is_plugin_enabled(Plugins.IPythonConsole):
+            if self.is_plugin_available(Plugins.IPythonConsole):
                 self._populate_help_menu()
         else:
             self._populate_help_menu()
@@ -101,20 +158,33 @@ class Application(SpyderPluginV2):
 
     @on_plugin_available(plugin=Plugins.StatusBar)
     def on_statusbar_available(self):
-        # Add status widget if created
-        if self.application_update_status:
-            statusbar = self.get_plugin(Plugins.StatusBar)
-            statusbar.add_status_widget(self.application_update_status)
+        statusbar = self.get_plugin(Plugins.StatusBar)
+        inapp_appeal_status = self.get_container().inapp_appeal_status
+        statusbar.add_status_widget(inapp_appeal_status)
 
-    # -------------------------- PLUGIN TEARDOWN ------------------------------
+    @on_plugin_available(plugin=Plugins.Toolbar)
+    def on_toolbar_available(self):
+        container = self.get_container()
+        toolbar = self.get_plugin(Plugins.Toolbar)
+        for action in [
+            container.new_action,
+            container.open_action,
+            container.save_action,
+            container.save_all_action
+        ]:
+            toolbar.add_item_to_application_toolbar(
+                action,
+                toolbar_id=ApplicationToolbars.File,
+                before=EditorWidgetActions.NewCell
+            )
 
-    @on_plugin_teardown(plugin=Plugins.StatusBar)
-    def on_statusbar_teardown(self):
-        # Remove status widget if created
-        if self.application_update_status:
-            statusbar = self.get_plugin(Plugins.StatusBar)
-            statusbar.remove_status_widget(self.application_update_status.ID)
+    @on_plugin_available(plugin=Plugins.UpdateManager)
+    def on_update_manager_available(self):
+        update_manager = self.get_plugin(Plugins.UpdateManager)
+        update_manager.sig_update_performed.connect(self._on_spyder_update)
 
+    # ---- Plugin Teardown
+    # -------------------------------------------------------------------------
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):
         preferences = self.get_plugin(Plugins.Preferences)
@@ -133,9 +203,36 @@ class Application(SpyderPluginV2):
     @on_plugin_teardown(plugin=Plugins.MainMenu)
     def on_main_menu_teardown(self):
         self._depopulate_file_menu()
+        self._depopulate_edit_menu()
+        self._depopulate_search_menu()
         self._depopulate_tools_menu()
         self._depopulate_help_menu()
         self.report_action.setVisible(False)
+
+    @on_plugin_teardown(plugin=Plugins.StatusBar)
+    def on_statusbar_teardown(self):
+        statusbar = self.get_plugin(Plugins.StatusBar)
+        inapp_appeal_status = self.get_container().inapp_appeal_status
+        statusbar.remove_status_widget(inapp_appeal_status.ID)
+
+    @on_plugin_teardown(plugin=Plugins.Toolbar)
+    def on_toolbar_teardown(self):
+        toolbar = self.get_plugin(Plugins.Toolbar)
+        for action in [
+            ApplicationActions.NewFile,
+            ApplicationActions.OpenFile,
+            ApplicationActions.SaveFile,
+            ApplicationActions.SaveAll
+        ]:
+            toolbar.remove_item_from_application_toolbar(
+                action,
+                toolbar_id=ApplicationToolbars.File
+            )
+
+    @on_plugin_teardown(plugin=Plugins.UpdateManager)
+    def on_update_manager_teardowm(self):
+        update_manager = self.get_plugin(Plugins.UpdateManager)
+        update_manager.sig_update_performed.disconnect(self._on_spyder_update)
 
     def on_close(self, _unused=True):
         self.get_container().on_close()
@@ -147,11 +244,6 @@ class Application(SpyderPluginV2):
         # Show dialog with missing dependencies
         if not running_under_pytest():
             container.compute_dependencies()
-
-        # Check for updates
-        if DEV is None and self.get_conf('check_updates_on_startup'):
-            container.give_updates_feedback = False
-            container.check_updates(startup=True)
 
         # Handle DPI scale and window changes to show a restart message.
         # Don't activate this functionality on macOS because it's being
@@ -165,18 +257,132 @@ class Application(SpyderPluginV2):
             screen.logicalDotsPerInchChanged.connect(
                 container.show_dpi_change_message)
 
+        # Show appeal the fifth and 25th time Spyder starts
+        spyder_runs = self.get_conf("spyder_runs_for_appeal", default=1)
+        if spyder_runs in [5, 25]:
+            container.inapp_appeal_status.show_appeal()
+
+            # Increase counting in one to not get stuck at this point.
+            # Fixes spyder-ide/spyder#22457
+            self.set_conf("spyder_runs_for_appeal", spyder_runs + 1)
+        else:
+            if spyder_runs < 25:
+                self.set_conf("spyder_runs_for_appeal", spyder_runs + 1)
+
     # ---- Private API
     # ------------------------------------------------------------------------
     def _populate_file_menu(self):
+        container = self.get_container()
         mainmenu = self.get_plugin(Plugins.MainMenu)
+
+        # New section
+        mainmenu.add_item_to_application_menu(
+            container.new_action,
+            menu_id=ApplicationMenus.File,
+            section=FileMenuSections.New,
+            before_section=FileMenuSections.Open
+        )
+
+        # Open section
+        open_actions = [
+            container.open_action,
+            container.open_last_closed_action,
+            container.recent_files_menu,
+        ]
+        for open_action in open_actions:
+            mainmenu.add_item_to_application_menu(
+                open_action,
+                menu_id=ApplicationMenus.File,
+                section=FileMenuSections.Open,
+                before_section=FileMenuSections.Save
+            )
+
+        # Save section
+        save_actions = [
+            container.save_action,
+            container.save_all_action,
+            container.save_as_action,
+            container.save_copy_as_action,
+            container.revert_action
+        ]
+        for save_action in save_actions:
+            mainmenu.add_item_to_application_menu(
+                save_action,
+                menu_id=ApplicationMenus.File,
+                section=FileMenuSections.Save,
+                before_section=FileMenuSections.Print
+            )
+
+        # Close section
+        close_actions = [
+            container.close_file_action,
+            container.close_all_action
+        ]
+        for close_action in close_actions:
+            mainmenu.add_item_to_application_menu(
+                close_action,
+                menu_id=ApplicationMenus.File,
+                section=FileMenuSections.Close,
+                before_section=FileMenuSections.Restart
+            )
+
+        # Restart section
         mainmenu.add_item_to_application_menu(
             self.restart_action,
             menu_id=ApplicationMenus.File,
-            section=FileMenuSections.Restart)
+            section=FileMenuSections.Restart
+        )
         mainmenu.add_item_to_application_menu(
             self.restart_debug_action,
             menu_id=ApplicationMenus.File,
-            section=FileMenuSections.Restart)
+            section=FileMenuSections.Restart
+        )
+
+    def _populate_edit_menu(self):
+        container = self.get_container()
+        mainmenu = self.get_plugin(Plugins.MainMenu)
+
+        # Undo/Redo section
+        for action in [container.undo_action, container.redo_action]:
+            mainmenu.add_item_to_application_menu(
+                action,
+                menu_id=ApplicationMenus.Edit,
+                section=EditMenuSections.UndoRedo,
+                before_section=EditMenuSections.Editor
+            )
+
+        # Edit section
+        edit_actions = [
+            container.cut_action,
+            container.copy_action,
+            container.paste_action,
+            container.select_all_action
+        ]
+        for edit_action in edit_actions:
+            mainmenu.add_item_to_application_menu(
+                edit_action,
+                menu_id=ApplicationMenus.Edit,
+                section=EditMenuSections.Copy,
+                before_section=EditMenuSections.Editor
+            )
+
+    def _populate_search_menu(self):
+        container = self.get_container()
+        mainmenu = self.get_plugin(Plugins.MainMenu)
+
+        # Find section
+        for action in [
+            container.find_action,
+            container.find_next_action,
+            container.find_previous_action,
+            container.replace_action,
+        ]:
+            mainmenu.add_item_to_application_menu(
+                action,
+                menu_id=ApplicationMenus.Search,
+                section=SearchMenuSections.FindInText,
+                before_section=SearchMenuSections.Cursor,
+            )
 
     def _populate_tools_menu(self):
         """Add base actions and menus to the Tools menu."""
@@ -184,13 +390,17 @@ class Application(SpyderPluginV2):
         mainmenu.add_item_to_application_menu(
             self.user_env_action,
             menu_id=ApplicationMenus.Tools,
-            section=ToolsMenuSections.Tools)
+            section=ToolsMenuSections.Managers,
+            before_section=ToolsMenuSections.Preferences,
+        )
 
         if get_debug_level() >= 2:
             mainmenu.add_item_to_application_menu(
                 self.debug_logs_menu,
-                menu_id=ApplicationMenus.Tools,
-                section=ToolsMenuSections.Extras)
+                menu_id=ApplicationMenus.Help,
+                section=HelpMenuSections.Support,
+                before_section=HelpMenuSections.About,
+            )
 
     def _populate_help_menu(self):
         """Add base actions and menus to the Help menu."""
@@ -201,41 +411,55 @@ class Application(SpyderPluginV2):
     def _populate_help_menu_documentation_section(self):
         """Add base Spyder documentation actions to the Help main menu."""
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        shortcuts = self.get_plugin(Plugins.Shortcuts)
-        shortcuts_summary_action = None
+        ipythonconsole = self.get_plugin(Plugins.IPythonConsole)
+        ipython_documentation_submenu = None
 
-        if shortcuts:
-            from spyder.plugins.shortcuts.plugin import ShortcutActions
-            shortcuts_summary_action = ShortcutActions.ShortcutSummaryAction
+        if ipythonconsole:
+            from spyder.plugins.ipythonconsole.api import (
+                IPythonConsoleWidgetMenus
+            )
+            ipython_documentation_submenu = (
+                IPythonConsoleWidgetMenus.Documentation
+            )
         for documentation_action in [
                 self.documentation_action, self.video_action]:
             mainmenu.add_item_to_application_menu(
                 documentation_action,
                 menu_id=ApplicationMenus.Help,
-                section=HelpMenuSections.Documentation,
-                before=shortcuts_summary_action,
-                before_section=HelpMenuSections.Support)
+                section=HelpMenuSections.ExternalDocumentation,
+                before=ipython_documentation_submenu,
+                before_section=HelpMenuSections.Support,
+            )
 
     def _populate_help_menu_support_section(self):
         """Add Spyder base support actions to the Help main menu."""
         mainmenu = self.get_plugin(Plugins.MainMenu)
         for support_action in [
-                self.trouble_action, self.report_action,
-                self.dependencies_action, self.check_updates_action,
-                self.support_group_action]:
+            self.trouble_action,
+            self.support_group_action,
+            self.dependencies_action,
+            self.report_action,
+        ]:
             mainmenu.add_item_to_application_menu(
                 support_action,
                 menu_id=ApplicationMenus.Help,
                 section=HelpMenuSections.Support,
-                before_section=HelpMenuSections.ExternalDocumentation)
+                before_section=HelpMenuSections.About,
+            )
 
     def _populate_help_menu_about_section(self):
         """Create Spyder base about actions."""
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        mainmenu.add_item_to_application_menu(
+        for action in [
+            self.get_action(ApplicationActions.ShowChangelogAction),
+            self.get_action(ApplicationActions.HelpSpyderAction),
             self.about_action,
-            menu_id=ApplicationMenus.Help,
-            section=HelpMenuSections.About)
+        ]:
+            mainmenu.add_item_to_application_menu(
+                action,
+                menu_id=ApplicationMenus.Help,
+                section=HelpMenuSections.About,
+            )
 
     @property
     def _window(self):
@@ -262,7 +486,6 @@ class Application(SpyderPluginV2):
                 ApplicationActions.SpyderTroubleshootingAction,
                 ConsoleActions.SpyderReportAction,
                 ApplicationActions.SpyderDependenciesAction,
-                ApplicationActions.SpyderCheckUpdatesAction,
                 ApplicationActions.SpyderSupportAction]:
             mainmenu.remove_item_from_application_menu(
                 support_action,
@@ -275,12 +498,53 @@ class Application(SpyderPluginV2):
             menu_id=ApplicationMenus.Help)
 
     def _depopulate_file_menu(self):
+        container = self.get_container()
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        for action_id in [ApplicationActions.SpyderRestart,
-                          ApplicationActions.SpyderRestartDebug]:
+        for action_id in [
+            ApplicationActions.NewFile,
+            ApplicationActions.OpenFile,
+            ApplicationActions.OpenLastClosed,
+            container.recent_file_menu,
+            ApplicationActions.SaveFile,
+            ApplicationActions.SaveAll,
+            ApplicationActions.SaveAs,
+            ApplicationActions.SaveCopyAs,
+            ApplicationActions.RevertFile,
+            ApplicationActions.CloseFile,
+            ApplicationActions.CloseAll,
+            ApplicationActions.SpyderRestart,
+            ApplicationActions.SpyderRestartDebug
+        ]:
             mainmenu.remove_item_from_application_menu(
                 action_id,
                 menu_id=ApplicationMenus.File)
+
+    def _depopulate_edit_menu(self):
+        mainmenu = self.get_plugin(Plugins.MainMenu)
+        for action_id in [
+            ApplicationActions.Undo,
+            ApplicationActions.Redo,
+            ApplicationActions.Cut,
+            ApplicationActions.Copy,
+            ApplicationActions.Paste,
+            ApplicationActions.SelectAll,
+        ]:
+            mainmenu.remove_item_from_application_menu(
+                action_id,
+                menu_id=ApplicationMenus.File)
+
+    def _depopulate_search_menu(self):
+        mainmenu = self.get_plugin(Plugins.MainMenu)
+        for action_id in [
+            ApplicationActions.FindText,
+            ApplicationActions.FindNext,
+            ApplicationActions.FindPrevious,
+            ApplicationActions.ReplaceText,
+        ]:
+            mainmenu.remove_item_from_application_menu(
+                action_id,
+                menu_id=ApplicationMenus.Search
+            )
 
     def _depopulate_tools_menu(self):
         """Add base actions and menus to the Tools menu."""
@@ -294,6 +558,96 @@ class Application(SpyderPluginV2):
                 ApplicationPluginMenus.DebugLogsMenu,
                 menu_id=ApplicationMenus.Tools)
 
+    def _update_focused_plugin(
+        self, plugin: Optional[SpyderDockablePlugin]
+    ) -> None:
+        """
+        Update which plugin has currently focus.
+
+        This function is called if another plugin gets keyboard focus.
+        """
+        self.focused_plugin = plugin
+        self._update_file_actions()
+        self._update_edit_actions()
+        self._update_search_actions()
+
+    def _update_file_actions(self) -> None:
+        """
+        Update which file actions are enabled.
+
+        File actions are enabled depending on whether the plugin that would
+        currently process the file action has enabled it or not.
+        """
+        plugin = self.focused_plugin
+        if not plugin or not getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin = self.get_plugin(Plugins.Editor, error=False)
+        if plugin:
+            for action_name in [
+                ApplicationActions.NewFile,
+                ApplicationActions.OpenLastClosed,
+                ApplicationActions.SaveFile,
+                ApplicationActions.SaveAll,
+                ApplicationActions.SaveAs,
+                ApplicationActions.SaveCopyAs,
+                ApplicationActions.RevertFile,
+                ApplicationActions.CloseFile,
+                ApplicationActions.CloseAll,
+            ]:
+                action = self.get_action(action_name)
+                key = (plugin.NAME, action_name)
+                state = self.file_action_enabled.get(key, True)
+                action.setEnabled(state)
+
+    def _update_edit_actions(self) -> None:
+        """
+        Update which edit actions are enabled.
+
+        Edit actions are enabled depending on whether the plugin that would
+        currently process the edit action has enabled it or not.
+        """
+        plugin = self.focused_plugin
+        if not plugin or not getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin = self.get_plugin(Plugins.Editor, error=False)
+        if plugin:
+            for action_name in [
+                ApplicationActions.Undo,
+                ApplicationActions.Redo,
+                ApplicationActions.Cut,
+                ApplicationActions.Copy,
+                ApplicationActions.Paste,
+                ApplicationActions.SelectAll,
+            ]:
+                action = self.get_action(action_name)
+                key = (plugin.NAME, action_name)
+                state = self.edit_action_enabled.get(key, True)
+                action.setEnabled(state)
+
+    def _update_search_actions(self) -> None:
+        """
+        Update which search actions are enabled.
+
+        Search actions are enabled depending on whether the plugin that would
+        currently process the search action has enabled it or not.
+        """
+        plugin = self.focused_plugin
+        if not plugin or not getattr(plugin, 'CAN_HANDLE_SEARCH_ACTIONS', False):
+            plugin = self.get_plugin(Plugins.Editor, error=False)
+        if plugin:
+            for action_name in [
+                ApplicationActions.FindText,
+                ApplicationActions.FindNext,
+                ApplicationActions.FindPrevious,
+                ApplicationActions.ReplaceText,
+            ]:
+                action = self.get_action(action_name)
+                key = (plugin.NAME, action_name)
+                state = self.search_action_enabled.get(key, True)
+                action.setEnabled(state)
+
+    def _on_spyder_update(self):
+        container = self.get_container()
+        container.inapp_appeal_status.show_changelog()
+
     # ---- Public API
     # ------------------------------------------------------------------------
     def get_application_context_menu(self, parent=None):
@@ -305,7 +659,7 @@ class Application(SpyderPluginV2):
 
         help_plugin = self.get_plugin(Plugins.Help)
         shortcuts = self.get_plugin(Plugins.Shortcuts)
-        menu = QMenu(parent=parent)
+        menu = SpyderMenu(parent=parent)
         actions = [self.documentation_action]
         # Help actions
         if help_plugin:
@@ -357,7 +711,7 @@ class Application(SpyderPluginV2):
 
         # Get current process and python running spyder
         pid = os.getpid()
-        python = sys.executable
+        python = SHORTCUT_EXE or sys.executable
 
         # Check if started with bootstrap.py
         if bootstrap_args is not None:
@@ -395,6 +749,430 @@ class Application(SpyderPluginV2):
             print(error)  # spyder: test-skip
             print(command)  # spyder: test-skip
 
+    def create_new_file(self) -> None:
+        """
+        Create new file in a suitable plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then create a new
+        file in that plugin. Otherwise, create a new file in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.create_new_file()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.new()
+
+    def open_file_using_dialog(self) -> None:
+        """
+        Show Open File dialog and open the selected file.
+
+        Try asking the plugin that currently has focus for the name of the
+        displayed file and whether it is a temporary file. If that does not
+        work, ask the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin:
+            filename = plugin.get_current_filename()
+        else:
+            filename = None
+
+        if filename is None and self.is_plugin_available(Plugins.Editor):
+            plugin = self.get_plugin(Plugins.Editor)
+            filename = plugin.get_current_filename()
+
+        if filename is not None and not plugin.current_file_is_temporary():
+            basedir = osp.dirname(filename)
+        else:
+            basedir = getcwd_or_home()
+
+        self.get_container().open_file_using_dialog(filename, basedir)
+
+    def open_file_in_plugin(self, filename: str) -> None:
+        """
+        Open given file in a suitable plugin.
+
+        Go through all plugins and open the file in the first plugin that
+        registered the extension of the given file name. If none is found,
+        then open the file in the Editor plugin.
+        """
+        ext = osp.splitext(filename)[1]
+        for plugin_name in PLUGIN_REGISTRY:
+            if PLUGIN_REGISTRY.is_plugin_available(plugin_name):
+                plugin = PLUGIN_REGISTRY.get_plugin(plugin_name)
+                if (
+                    isinstance(plugin, SpyderDockablePlugin)
+                    and ext in plugin.FILE_EXTENSIONS
+                ):
+                    plugin.switch_to_plugin()
+                    plugin.open_file(filename)
+                    return
+
+        if self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.load(filename)
+
+    def open_last_closed_file(self) -> None:
+        """
+        Open the last closed file again.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then open the
+        last closed file in that plugin. Otherwise, open the last closed file
+        in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.open_last_closed_file()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.open_last_closed()
+
+    def add_recent_file(self, fname: str) -> None:
+        """
+        Add file to list of recent files.
+
+        This function adds the given file name to the list of recent files,
+        which is used in the `File > Open recent` menu. The function ensures
+        that the list has no duplicates and it is no longer than the maximum
+        length.
+        """
+        self.get_container().add_recent_file(fname)
+
+    def save_file(self) -> None:
+        """
+        Save current file.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then save the
+        current file in that plugin. Otherwise, save the current file in the
+        Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.save_file()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.save()
+
+    def save_file_as(self) -> None:
+        """
+        Save current file under a different name.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then save the
+        current file in that plugin under a different name. Otherwise, save
+        the current file in the Editor plugin under a different name.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.save_file_as()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.save_as()
+
+    def save_copy_as(self) -> None:
+        """
+        Save copy of current file under a different name.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then save a copy of
+        the current file in that plugin under a different name. Otherwise, save
+        a copy of the current file in the Editor plugin under a different name.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.save_copy_as()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.save_copy_as()
+
+    def save_all(self) -> None:
+        """
+        Save all files.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then save all files
+        in that plugin. Otherwise, save all files in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.save_all()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.save_all()
+
+    def revert_file(self) -> None:
+        """
+        Revert current file to the version on disk.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then revert the
+        current file in that plugin to the version stored on disk. Otherwise,
+        revert the current file in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.revert_file()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.revert_file()
+
+    def close_file(self) -> None:
+        """
+        Close the current file.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then close the
+        current file in that plugin. Otherwise, close the current file in the
+        Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.close_file()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.close_file()
+
+    def close_all(self) -> None:
+        """
+        Close all opened files in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_FILE_ACTIONS` attribute set to `True`, then close all
+        files in that plugin. Otherwise, close all files in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_FILE_ACTIONS', False):
+            plugin.close_all()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.close_all_files()
+
+    def enable_file_action(
+        self,
+        action_name: str,
+        enabled: bool,
+        plugin: str
+    ) -> None:
+        """
+        Enable or disable file actions for a given plugin.
+
+        Parameters
+        ----------
+        action_name : str
+            The name of the action to be enabled or disabled. These names
+            are listed in ApplicationActions, for instance "New file"
+        enabled : bool
+            True to enable the action, False to disable it.
+        plugin : str
+            The name of the plugin for which the file action needs to be
+            enabled or disabled.
+        """
+        self.file_action_enabled[(plugin, action_name)] = enabled
+        self._update_file_actions()
+
+    def undo(self) -> None:
+        """
+        Do an undo operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the undo
+        operation in that plugin. Otherwise, undo in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.undo()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.undo()
+
+    def redo(self) -> None:
+        """
+        Do a redo operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the redo
+        operation in that plugin. Otherwise, redo in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.redo()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.redo()
+
+    def cut(self) -> None:
+        """
+        Do a cut operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the cut
+        operation in that plugin. Otherwise, cut in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.cut()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.cut()
+
+    def copy(self) -> None:
+        """
+        Do a copy operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the copy
+        operation in that plugin. Otherwise, copy in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.copy()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.copy()
+
+    def paste(self) -> None:
+        """
+        Do a paste operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the paste
+        operation in that plugin. Otherwise, paste in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.paste()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.paste()
+
+    def select_all(self) -> None:
+        """
+        Do a select all operation in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_EDIT_ACTIONS` attribute set to `True`, then do the select
+        all operation in that plugin. Otherwise, select all in the Editor
+        plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_EDIT_ACTIONS', False):
+            plugin.select_all()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.select_all()
+
+    def enable_edit_action(
+        self,
+        action_name: str,
+        enabled: bool,
+        plugin: str
+    ) -> None:
+        """
+        Enable or disable edit actions for a given plugin.
+
+        Parameters
+        ----------
+        action_name : str
+            The name of the action to be enabled or disabled. These names
+            are listed in ApplicationActions, for instance "Undo".
+        enabled : bool
+            True to enable the action, False to disable it.
+        plugin : str
+            The name of the plugin for which the edit action needs to be
+            enabled or disabled.
+        """
+        self.edit_action_enabled[(plugin, action_name)] = enabled
+        self._update_edit_actions()
+
+    def find(self) -> None:
+        """
+        Do a find text in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_SEARCH_ACTIONS` attribute set to `True`, then do the find
+        text in that plugin. Otherwise, find text in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_SEARCH_ACTIONS', False):
+            plugin.find()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.find()
+
+    def find_next(self) -> None:
+        """
+        Do a find next text occurrence in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_SEARCH_ACTIONS` attribute set to `True`, then do the find
+        next text occurrence in that plugin. Otherwise, find next text
+        occurrence in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_SEARCH_ACTIONS', False):
+            plugin.find_next()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.find_next()
+
+    def find_previous(self) -> None:
+        """
+        Do a find previous text occurrence in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_SEARCH_ACTIONS` attribute set to `True`, then do the find
+        previous text occurrence in that plugin. Otherwise, find previous text
+        occurrence in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_SEARCH_ACTIONS', False):
+            plugin.find_previous()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.find_previous()
+
+    def replace(self) -> None:
+        """
+        Do a replace text occurrence in the current plugin.
+
+        If the plugin that currently has focus, has its
+        `CAN_HANDLE_SEARCH_ACTIONS` attribute set to `True`, then do the
+        replace text occurrence in that plugin. Otherwise, replace text
+        occurrence in the Editor plugin.
+        """
+        plugin = self.focused_plugin
+        if plugin and getattr(plugin, 'CAN_HANDLE_SEARCH_ACTIONS', False):
+            plugin.replace()
+        elif self.is_plugin_available(Plugins.Editor):
+            editor = self.get_plugin(Plugins.Editor)
+            editor.replace()
+
+    def enable_search_action(
+        self,
+        action_name: str,
+        enabled: bool,
+        plugin: str
+    ) -> None:
+        """
+        Enable or disable a search action for a given plugin.
+
+        Parameters
+        ----------
+        action_name : str
+            The name of the action to be enabled or disabled. These names
+            are listed in ApplicationActions, for instance "FindText".
+        enabled : bool
+            True to enable the action, False to disable it.
+        plugin : str
+            The name of the plugin for which the search action needs to be
+            enabled or disabled.
+        """
+        self.search_action_enabled[(plugin, action_name)] = enabled
+        self._update_search_actions()
+
     @property
     def documentation_action(self):
         """Open Spyder's Documentation in the browser."""
@@ -414,11 +1192,6 @@ class Application(SpyderPluginV2):
     def dependencies_action(self):
         """Show Spyder's Dependencies dialog box."""
         return self.get_container().dependencies_action
-
-    @property
-    def check_updates_action(self):
-        """Check if a new version of Spyder is available."""
-        return self.get_container().check_updates_action
 
     @property
     def support_group_action(self):
@@ -454,7 +1227,3 @@ class Application(SpyderPluginV2):
     def debug_logs_menu(self):
         return self.get_container().get_menu(
             ApplicationPluginMenus.DebugLogsMenu)
-
-    @property
-    def application_update_status(self):
-        return self.get_container().application_update_status

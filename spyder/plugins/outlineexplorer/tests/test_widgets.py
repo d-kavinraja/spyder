@@ -150,8 +150,7 @@ def test_follow_cursor(create_outlineexplorer, qtbot):
     # Move the mouse cursor in the editor to line 52
     editor = outlineexplorer.treewidget.current_editor
     editor._editor.go_to_line(52)
-    assert editor._editor.get_text_line(51) == \
-           "        super(Class1, self).__init__()"
+    assert editor._editor.get_text_line(51) == "        super().__init__()"
 
     # __init__ is collapsed
     assert outlineexplorer.treewidget.currentItem().text(0) == '__init__'
@@ -215,6 +214,37 @@ def test_go_to_last_item(create_outlineexplorer, qtbot):
         outlineexplorer.get_toolbutton(OutlineExplorerToolbuttons.GoToCursor),
         Qt.LeftButton)
     assert outlineexplorer.treewidget.currentItem().text(0) == 'method1'
+
+
+@flaky(max_runs=10)
+def test_display_variables(create_outlineexplorer, qtbot):
+    """
+    Test that clicking on the 'Display variables and attributes' button located in the
+    toolbar of the outline explorer is working as expected by updating the tree widget.
+
+    Regression test for spyder-ide/spyder#21456.
+    """
+    outlineexplorer, _ = create_outlineexplorer('text')
+
+    editor = outlineexplorer.treewidget.current_editor
+    state = outlineexplorer.treewidget.display_variables
+
+    editor_id = editor.get_id()
+
+    initial_tree = outlineexplorer.treewidget.editor_tree_cache[editor_id]
+
+    outlineexplorer.treewidget.toggle_variables(not state)
+
+    first_toggle_tree = outlineexplorer.treewidget.editor_tree_cache[editor_id]
+
+    assert first_toggle_tree != initial_tree
+
+    outlineexplorer.treewidget.toggle_variables(state)
+
+    second_toggle_tree = outlineexplorer.treewidget.editor_tree_cache[editor_id]
+
+    assert (second_toggle_tree != first_toggle_tree) and (
+        second_toggle_tree == initial_tree)
 
 
 if __name__ == "__main__":

@@ -15,11 +15,10 @@ from itertools import groupby
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QFont, QKeySequence
 from qtpy.QtWidgets import (QDialog, QLabel, QGridLayout, QGroupBox,
-                            QVBoxLayout, QHBoxLayout, QDesktopWidget,
-                            QScrollArea, QWidget)
+                            QVBoxLayout, QHBoxLayout, QScrollArea, QWidget)
 
 # Local imports
-from spyder.config.base import _
+from spyder.api.translations import _
 from spyder.config.manager import CONF
 
 # Constants
@@ -148,8 +147,7 @@ class ShortcutsSummaryDialog(QDialog):
 
     def get_screen_resolution(self):
         """Return the screen resolution of the primary screen."""
-        widget = QDesktopWidget()
-        geometry = widget.availableGeometry(widget.primaryScreen())
+        geometry = self.screen().availableGeometry()
         return geometry.width(), geometry.height()
 
 

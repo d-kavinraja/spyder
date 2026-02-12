@@ -17,16 +17,18 @@ from qtpy.compat import to_qvariant
 from qtpy.QtCore import (Qt, Slot, QAbstractTableModel, QModelIndex,
                          QSize)
 from qtpy.QtWidgets import (QAbstractItemView, QCheckBox,
-                            QComboBox, QDialog, QDialogButtonBox, QGroupBox,
+                            QDialog, QDialogButtonBox, QGroupBox,
                             QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                             QSpinBox, QTableView, QVBoxLayout)
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
-from spyder.config.base import _
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
+from spyder.api.translations import _
+from spyder.api.widgets.comboboxes import SpyderComboBox
+from spyder.api.widgets.dialogs import SpyderDialogButtonBox
 from spyder.plugins.completion.api import SUPPORTED_LANGUAGES
 from spyder.utils.misc import check_connection_port
-from spyder.utils.palette import QStylePalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.programs import find_program
 from spyder.widgets.helperwidgets import ItemDelegate
 from spyder.widgets.simplecodeeditor import SimpleCodeEditor
@@ -128,7 +130,7 @@ class LSPServerEditor(QDialog, SpyderFontsMixin):
                  port=2084, args='', external=False, stdio=False,
                  configurations={}, get_option=None, set_option=None,
                  remove_option=None, **kwargs):
-        super(LSPServerEditor, self).__init__(parent)
+        super().__init__(parent)
 
         description = _(
             "To create a new server configuration, you need to select a "
@@ -150,7 +152,7 @@ class LSPServerEditor(QDialog, SpyderFontsMixin):
 
         # Widgets
         self.server_settings_description = QLabel(description)
-        self.lang_cb = QComboBox(self)
+        self.lang_cb = SpyderComboBox(self)
         self.external_cb = QCheckBox(_('External server'), self)
         self.host_label = QLabel(_('Host:'))
         self.host_input = QLineEdit(self)
@@ -164,8 +166,9 @@ class LSPServerEditor(QDialog, SpyderFontsMixin):
         self.conf_label = QLabel(_('<b>Server Configuration:</b>'))
         self.conf_input = SimpleCodeEditor(None)
 
-        self.bbox = QDialogButtonBox(QDialogButtonBox.Ok |
-                                     QDialogButtonBox.Cancel)
+        self.bbox = SpyderDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
         self.button_ok = self.bbox.button(QDialogButtonBox.Ok)
         self.button_cancel = self.bbox.button(QDialogButtonBox.Cancel)
 
@@ -499,7 +502,7 @@ class LSPServersModel(QAbstractTableModel):
         self.widths = []
 
         # Needed to compensate for the HTMLDelegate color selection unawareness
-        self.text_color = QStylePalette.COLOR_TEXT_1
+        self.text_color = SpyderPalette.COLOR_TEXT_1
 
     def sortByName(self):
         """Qt Override."""
@@ -593,11 +596,11 @@ class LSPServerTable(QTableView):
         """Qt Override."""
         # self.source_model.update_active_row()
         # self._parent.delete_btn.setEnabled(False)
-        super(LSPServerTable, self).focusOutEvent(e)
+        super().focusOutEvent(e)
 
     def focusInEvent(self, e):
         """Qt Override."""
-        super(LSPServerTable, self).focusInEvent(e)
+        super().focusInEvent(e)
         self.selectRow(self.currentIndex().row())
 
     def selection(self, index):
@@ -699,9 +702,9 @@ class LSPServerTable(QTableView):
         elif key in [Qt.Key_Backtab]:
             self.parent().reset_btn.setFocus()
         elif key in [Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right]:
-            super(LSPServerTable, self).keyPressEvent(event)
+            super().keyPressEvent(event)
         else:
-            super(LSPServerTable, self).keyPressEvent(event)
+            super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """Qt Override."""

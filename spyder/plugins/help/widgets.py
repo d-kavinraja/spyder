@@ -14,37 +14,41 @@ import socket
 import sys
 
 # Third party imports
-from qtpy import PYQT5
+from qtpy import PYSIDE2
 from qtpy.QtCore import Qt, QUrl, Signal, Slot, QPoint
 from qtpy.QtGui import QColor
-from qtpy.QtWebEngineWidgets import WEBENGINE, QWebEnginePage
-from qtpy.QtWidgets import (QActionGroup, QComboBox, QLabel, QLineEdit,
+from qtpy.QtWidgets import (QActionGroup, QLabel, QLineEdit,
                             QMessageBox, QSizePolicy, QStackedWidget,
                             QVBoxLayout, QWidget)
 
 # Local imports
 from spyder.api.config.decorators import on_conf_change
 from spyder.api.translations import _
+from spyder.api.widgets.comboboxes import SpyderComboBox
 from spyder.api.widgets.main_widget import PluginMainWidget
 from spyder.api.widgets.mixins import SpyderWidgetMixin
 from spyder.config.base import get_module_source_path
 from spyder.plugins.help.utils.sphinxify import (CSS_PATH, generate_context,
                                                  loading, usage, warning)
 from spyder.plugins.help.utils.sphinxthread import SphinxThread
-from spyder.py3compat import to_text_string
 from spyder.utils import programs
 from spyder.utils.image_path_manager import get_image_path
-from spyder.utils.palette import QStylePalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.qthelpers import start_file
-from spyder.widgets.browser import FrameWebView
 from spyder.widgets.comboboxes import EditableComboBox
 from spyder.widgets.findreplace import FindReplace
 from spyder.widgets.simplecodeeditor import SimpleCodeEditor
 
+# In case WebEngine is not available (e.g. in Conda-forge)
+try:
+    from qtpy.QtWebEngineWidgets import WEBENGINE
+except ImportError:
+    WEBENGINE = False
+
 
 # --- Constants
 # ----------------------------------------------------------------------------
-MAIN_BG_COLOR = QStylePalette.COLOR_BACKGROUND_1
+MAIN_BG_COLOR = SpyderPalette.COLOR_BACKGROUND_1
 
 
 class HelpWidgetActions:
@@ -103,7 +107,7 @@ class ObjectComboBox(EditableComboBox):
             qstr = self.currentText()
         if not re.search(r'^[a-zA-Z0-9_\.]*$', str(qstr), 0):
             return False
-        objtxt = to_text_string(qstr)
+        objtxt = str(qstr)
         shell_is_defined = False
         if self.help.get_conf('automatic_import'):
             shell = self.help.internal_shell
@@ -151,11 +155,14 @@ class RichText(QWidget, SpyderWidgetMixin):
     sig_link_clicked = Signal(QUrl)
 
     def __init__(self, parent):
-        if PYQT5:
+        if not PYSIDE2:
             super().__init__(parent, class_parent=parent)
         else:
             QWidget.__init__(self, parent)
             SpyderWidgetMixin.__init__(self, class_parent=parent)
+
+        from qtpy.QtWebEngineWidgets import QWebEnginePage
+        from spyder.widgets.browser import FrameWebView
 
         self.webview = FrameWebView(self)
         self.webview.setup()
@@ -315,7 +322,7 @@ class HelpWidget(PluginMainWidget):
         self.source_label = QLabel(_("Source"))
         self.source_label.ID = HelpWidgetToolbarItems.SourceLabel
 
-        self.source_combo = QComboBox(self)
+        self.source_combo = SpyderComboBox(self)
         self.source_combo.ID = HelpWidgetToolbarItems.SourceCombo
 
         self.object_label = QLabel(_("Object"))
@@ -556,21 +563,7 @@ class HelpWidget(PluginMainWidget):
         self.set_plain_text_color_scheme(value)
 
     def update_actions(self):
-        for __, action in self.get_actions().items():
-            # IMPORTANT: Since we are defining the main actions in here
-            # and the context is WidgetWithChildrenShortcut we need to
-            # assign the same actions to the children widgets in order
-            # for shortcuts to work
-            for widget in [self.plain_text,
-                           self.rich_text,
-                           self.source_combo,
-                           self.object_combo,
-                           self.object_edit]:
-                if action not in widget.actions():
-                    try:
-                        widget.addAction(action)
-                    except RuntimeError:
-                        pass
+        pass
 
     def get_focus_widget(self):
         self.object_combo.lineEdit().selectAll()
@@ -882,7 +875,7 @@ class HelpWidget(PluginMainWidget):
         url: QUrl
             QUrl object containing the link to open.
         """
-        url = to_text_string(url.toString())
+        url = str(url.toString())
         if url == "spy://tutorial":
             self.show_tutorial()
         elif url.startswith('http'):
@@ -933,7 +926,7 @@ class HelpWidget(PluginMainWidget):
         self.switch_to_console_source()
         add_to_combo = True
         if text is None:
-            text = to_text_string(self.object_combo.currentText())
+            text = str(self.object_combo.currentText())
             add_to_combo = False
 
         found = self.show_help(text, ignore_unknown=ignore_unknown)
@@ -1047,7 +1040,7 @@ class HelpWidget(PluginMainWidget):
         if shell is None:
             return
 
-        obj_text = to_text_string(obj_text)
+        obj_text = str(obj_text)
 
         if not shell.is_defined(obj_text):
             if (self.get_conf('automatic_import')
@@ -1144,7 +1137,7 @@ class HelpWidget(PluginMainWidget):
         """
         history = []
         for index in range(self.object_combo.count()):
-            history.append(to_text_string(self.object_combo.itemText(index)))
+            history.append(str(self.object_combo.itemText(index)))
 
         return history
 

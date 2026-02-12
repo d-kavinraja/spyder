@@ -36,7 +36,8 @@ import re
 from qtpy.QtCore import QTimer
 
 # Local imports
-from spyder.config.base import _, get_conf_path, running_under_pytest
+from spyder.api.translations import _
+from spyder.config.base import get_conf_path, running_under_pytest
 from spyder.plugins.editor.widgets.autosaveerror import AutosaveErrorDialog
 from spyder.plugins.editor.widgets.recover import RecoveryDialog
 from spyder.utils.programs import is_spyder_process
@@ -72,9 +73,12 @@ class AutosaveForPlugin(object):
         self.editor = editor
         self.name_mapping = {}
         self.file_hashes = {}
+        self.recover_files_to_open = []
+
         self.timer = QTimer(self.editor)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.do_autosave)
+
         self._enabled = False  # Can't use setter here
         self._interval = self.DEFAULT_AUTOSAVE_INTERVAL
 
@@ -199,7 +203,10 @@ class AutosaveForPlugin(object):
         the pid files.
         """
         files_to_recover, pidfiles = self.get_files_to_recover()
-        parent = self.editor if running_under_pytest() else self.editor.main
+        parent = (
+            self.editor if running_under_pytest() else
+            self.editor._get_mainwindow()
+        )
         dialog = RecoveryDialog(files_to_recover, parent=parent)
         dialog.exec_if_nonempty()
         self.recover_files_to_open = dialog.files_to_open[:]
@@ -305,7 +312,7 @@ class AutosaveForStack(object):
         autosave_filename = self.name_mapping[filename]
         try:
             os.remove(autosave_filename)
-        except EnvironmentError as error:
+        except (FileNotFoundError, OSError) as error:
             action = (_('Error while removing autosave file {}')
                       .format(autosave_filename))
             msgbox = AutosaveErrorDialog(action, error)
@@ -341,7 +348,7 @@ class AutosaveForStack(object):
             if not osp.isdir(autosave_dir):
                 try:
                     os.mkdir(autosave_dir)
-                except EnvironmentError as error:
+                except (PermissionError, OSError) as error:
                     action = _('Error while creating autosave directory')
                     msgbox = AutosaveErrorDialog(action, error)
                     msgbox.exec_if_enabled()
@@ -411,7 +418,7 @@ class AutosaveForStack(object):
             self.stack._write_to_file(finfo, autosave_filename)
             autosave_hash = self.stack.compute_hash(finfo)
             self.file_hashes[autosave_filename] = autosave_hash
-        except EnvironmentError as error:
+        except (PermissionError, OSError) as error:
             action = (_('Error while autosaving {} to {}')
                       .format(finfo.filename, autosave_filename))
             msgbox = AutosaveErrorDialog(action, error)

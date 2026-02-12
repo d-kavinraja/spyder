@@ -19,7 +19,6 @@ from qtpy import QtCore, QtGui, QtPrintSupport, QtWidgets
 from qtconsole.rich_text import HtmlExporter
 from qtconsole.util import MetaQObjectHasTraits, get_font, superQ
 
-from ipython_genutils.text import columnize
 from traitlets.config.configurable import LoggingConfigurable
 from traitlets import Bool, Enum, Integer, Unicode
 
@@ -28,6 +27,7 @@ from .completion_widget import CompletionWidget
 from .completion_html import CompletionHtml
 from .completion_plain import CompletionPlain
 from .kill_ring import QtKillRing
+from .util import columnize
 
 
 def is_letter_or_number(char):
@@ -297,6 +297,10 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
         self._reading_callback = None
         self._tab_width = 4
 
+        # Cursor position of where to insert text.
+        # Control characters allow this to move around on the current line.
+        self._insert_text_cursor = self._control.textCursor()
+
         # List of strings pending to be appended as plain text in the widget.
         # The text is not immediately inserted when available to not
         # choke the Qt event loop with paint events for the widget in
@@ -483,6 +487,26 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
             else:
                 pos = event.globalPos()
             QtWidgets.QToolTip.showText(pos, anchor)
+
+        elif (
+            etype == QtCore.QEvent.Wheel
+            and self._control_key_down(event.modifiers())
+        ):
+            if sys.platform != 'darwin':
+                if hasattr(event, 'angleDelta'):
+                    if event.angleDelta().y() < 0:
+                        self._decrease_font_size()
+                    elif event.angleDelta().y() > 0:
+                        self._increase_font_size()
+                elif hasattr(event, 'delta'):
+                    if event.delta() < 0:
+                        self._decrease_font_size()
+                    elif event.delta() > 0:
+                        self._increase_font_size()
+
+            # This is necessary to prevent that the mouse wheel event also
+            # scrolls up and down in this case.
+            return True
 
         return super().eventFilter(obj, event)
 
@@ -695,6 +719,9 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
             # effect when using a QTextEdit. I believe this is a Qt bug.
             self._control.moveCursor(QtGui.QTextCursor.End)
 
+            # Advance where text is inserted
+            self._insert_text_cursor.movePosition(QtGui.QTextCursor.End)
+
     def export_html(self):
         """ Shows a dialog to export HTML/XML in various formats.
         """
@@ -710,6 +737,9 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
 
         # There is no prompt now, so before_prompt_position is eof
         self._append_before_prompt_cursor.setPosition(
+            self._get_end_cursor().position())
+
+        self._insert_text_cursor.setPosition(
             self._get_end_cursor().position())
 
         # The maximum block count is only in effect during execution.
@@ -841,12 +871,12 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
 
             self._insert_plain_text_into_buffer(cursor, dedent(text))
 
-    def print_(self, printer = None):
+    def print_(self, printer=None):
         """ Print the contents of the ConsoleWidget to the specified QPrinter.
         """
-        if (not printer):
+        if not printer:
             printer = QtPrintSupport.QPrinter()
-            if(QtPrintSupport.QPrintDialog(printer).exec_() != QtPrintSupport.QPrintDialog.Accepted):
+            if QtPrintSupport.QPrintDialog(printer).exec_() != QtPrintSupport.QPrintDialog.Accepted:
                 return
         self._control.print_(printer)
 
@@ -998,18 +1028,40 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
         current prompt, if there is one.
         """
         # Determine where to insert the content.
-        cursor = self._control.textCursor()
+        cursor = self._insert_text_cursor
         if before_prompt and (self._reading or not self._executing):
             self._flush_pending_stream()
-            cursor._insert_mode=True
-            cursor.setPosition(self._append_before_prompt_pos)
+
+            # Jump to before prompt, if there is one
+            if cursor.position() >= self._append_before_prompt_pos \
+                    and self._append_before_prompt_pos != self._get_end_pos():
+                cursor.setPosition(self._append_before_prompt_pos)
+
+                # If we're appending on the same line as the prompt, use insert mode.
+                # If so, the character at self._append_before_prompt_pos will not be a newline
+                cursor.movePosition(QtGui.QTextCursor.Right,
+                                    QtGui.QTextCursor.KeepAnchor)
+                if cursor.selection().toPlainText() != '\n':
+                    cursor._insert_mode = True
+                cursor.movePosition(QtGui.QTextCursor.Left)
         else:
+            # Insert at current printing point.
+            # If cursor is before prompt jump to end, but only if there
+            # is a prompt (before_prompt_pos != end)
+            if cursor.position() <= self._append_before_prompt_pos \
+                    and self._append_before_prompt_pos != self._get_end_pos():
+                cursor.movePosition(QtGui.QTextCursor.End)
+
             if insert != self._insert_plain_text:
                 self._flush_pending_stream()
-            cursor.movePosition(QtGui.QTextCursor.End)
 
         # Perform the insertion.
         result = insert(cursor, input, *args, **kwargs)
+
+        # Remove insert mode tag
+        if hasattr(cursor, '_insert_mode'):
+            del cursor._insert_mode
+
         return result
 
     def _append_block(self, block_format=None, before_prompt=False):
@@ -1045,7 +1097,7 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
         # Select and remove all text below the input buffer.
         cursor = self._get_prompt_cursor()
         prompt = self._continuation_prompt.lstrip()
-        if(self._temp_buffer_filled):
+        if self._temp_buffer_filled:
             self._temp_buffer_filled = False
             while cursor.movePosition(QtGui.QTextCursor.NextBlock):
                 temp_cursor = QtGui.QTextCursor(cursor)
@@ -1657,16 +1709,18 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
         return False
 
     def _on_flush_pending_stream_timer(self):
-        """ Flush the pending stream output and change the
-        prompt position appropriately.
+        """ Flush pending text into the widget on console timer trigger.
         """
-        cursor = self._control.textCursor()
-        cursor.movePosition(QtGui.QTextCursor.End)
         self._flush_pending_stream()
-        cursor.movePosition(QtGui.QTextCursor.End)
 
     def _flush_pending_stream(self):
-        """ Flush out pending text into the widget. """
+        """
+        Flush pending text into the widget.
+
+        It only applies to text that is pending when the console is in the
+        running state. Text printed when console is not running is shown
+        immediately, and does not wait to be flushed.
+        """
         text = self._pending_insert_text
         self._pending_insert_text = []
         buffer_size = self._control.document().maximumBlockCount()
@@ -1674,33 +1728,11 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
             text = self._get_last_lines_from_list(text, buffer_size)
         text = ''.join(text)
         t = time.time()
-        self._insert_plain_text(self._get_end_cursor(), text, flush=True)
+        self._insert_plain_text(self._insert_text_cursor, text, flush=True)
         # Set the flush interval to equal the maximum time to update text.
         self._pending_text_flush_interval.setInterval(
             int(max(100, (time.time() - t) * 1000))
         )
-
-    def _format_as_columns(self, items, separator='  '):
-        """ Transform a list of strings into a single string with columns.
-
-        Parameters
-        ----------
-        items : sequence of strings
-            The strings to process.
-
-        separator : str, optional [default is two spaces]
-            The string that separates columns.
-
-        Returns
-        -------
-        The formatted string.
-        """
-        # Calculate the number of characters available.
-        width = self._control.document().textWidth()
-        char_width = self._get_font_width()
-        displaywidth = max(10, (width / char_width) - 1)
-
-        return columnize(items, separator, displaywidth)
 
     def _get_cursor(self):
         """ Get a cursor at the current insert position.
@@ -2115,12 +2147,12 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
 
         if (self._executing and not flush and
                 self._pending_text_flush_interval.isActive() and
-                cursor.position() == self._get_end_pos()):
+                cursor.position() == self._insert_text_cursor.position()):
             # Queue the text to insert in case it is being inserted at end
             self._pending_insert_text.append(text)
             if buffer_size > 0:
                 self._pending_insert_text = self._get_last_lines_from_list(
-                                        self._pending_insert_text, buffer_size)
+                    self._pending_insert_text, buffer_size)
             return
 
         if self._executing and not self._pending_text_flush_interval.isActive():
@@ -2145,7 +2177,7 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
                             cursor.select(QtGui.QTextCursor.Document)
                             remove = True
                         if act.area == 'line':
-                            if act.erase_to == 'all': 
+                            if act.erase_to == 'all':
                                 cursor.select(QtGui.QTextCursor.LineUnderCursor)
                                 remove = True
                             elif act.erase_to == 'start':
@@ -2159,7 +2191,7 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
                                     QtGui.QTextCursor.EndOfLine,
                                     QtGui.QTextCursor.KeepAnchor)
                                 remove = True
-                        if remove: 
+                        if remove:
                             nspace=cursor.selectionEnd()-cursor.selectionStart() if fill else 0
                             cursor.removeSelectedText()
                             if nspace>0: cursor.insertText(' '*nspace) # replace text by space, to keep cursor position as specified
@@ -2176,6 +2208,27 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
                             cursor.select(QtGui.QTextCursor.Document)
                             cursor.removeSelectedText()
 
+                    elif act.action == 'move' and act.unit == 'line':
+                        if act.dir == 'up':
+                            for i in range(act.count):
+                                cursor.movePosition(
+                                    QtGui.QTextCursor.Up
+                                )
+                        elif act.dir == 'down':
+                            for i in range(act.count):
+                                cursor.movePosition(
+                                    QtGui.QTextCursor.Down
+                                )
+                        elif act.dir == 'leftup':
+                            for i in range(act.count):
+                                cursor.movePosition(
+                                    QtGui.QTextCursor.Up
+                                )
+                            cursor.movePosition(
+                                QtGui.QTextCursor.StartOfLine,
+                                QtGui.QTextCursor.MoveAnchor
+                            )
+
                     elif act.action == 'carriage-return':
                         cursor.movePosition(
                             QtGui.QTextCursor.StartOfLine,
@@ -2191,20 +2244,34 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
                                 QtGui.QTextCursor.MoveAnchor)
 
                     elif act.action == 'newline':
-                        cursor.movePosition(QtGui.QTextCursor.EndOfLine)
+                        if (
+                            cursor.block() != cursor.document().lastBlock()
+                            and not cursor.document()
+                            .toPlainText()
+                            .endswith(self._prompt)
+                        ):
+                            cursor.movePosition(QtGui.QTextCursor.NextBlock)
+                        else:
+                            cursor.movePosition(
+                                QtGui.QTextCursor.EndOfLine,
+                                QtGui.QTextCursor.MoveAnchor,
+                            )
+                            cursor.insertText("\n")
 
                 # simulate replacement mode
                 if substring is not None:
                     format = self._ansi_processor.get_format()
-                    if not (hasattr(cursor,'_insert_mode') and cursor._insert_mode):
+
+                    # Note that using _insert_mode means the \r ANSI sequence will not swallow characters.
+                    if not (hasattr(cursor, '_insert_mode') and cursor._insert_mode):
                         pos = cursor.position()
                         cursor2 = QtGui.QTextCursor(cursor)  # self._get_line_end_pos() is the previous line, don't use it
                         cursor2.movePosition(QtGui.QTextCursor.EndOfLine)
                         remain = cursor2.position() - pos    # number of characters until end of line
                         n=len(substring)
                         swallow = min(n, remain)             # number of character to swallow
-                        cursor.setPosition(pos+swallow,QtGui.QTextCursor.KeepAnchor)
-                    cursor.insertText(substring,format)
+                        cursor.setPosition(pos + swallow, QtGui.QTextCursor.KeepAnchor)
+                    cursor.insertText(substring, format)
         else:
             cursor.insertText(text)
         cursor.endEditBlock()
@@ -2421,7 +2488,7 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
 
         self._reading = True
         if password:
-            self._show_prompt('Warning: QtConsole does not support password mode, '\
+            self._show_prompt('Warning: QtConsole does not support password mode, '
                               'the text you type will be visible.', newline=True)
 
         if 'ipdb' not in prompt.lower():
@@ -2553,6 +2620,9 @@ class ConsoleWidget(MetaQObjectHasTraits('NewBase', (LoggingConfigurable, superQ
         if move_forward:
             self._append_before_prompt_cursor.setPosition(
                 self._append_before_prompt_cursor.position() + 1)
+        else:
+            # cursor position was 0, set before prompt cursor
+            self._append_before_prompt_cursor.setPosition(0)
         self._prompt_started()
 
     #------ Signal handlers ----------------------------------------------------

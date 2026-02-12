@@ -8,8 +8,16 @@
 IPython Console mixins.
 """
 
+# Standard library imports
+import os
+import os.path as osp
+
+# Third-party imports
+from packaging.version import parse
+
 # Local imports
 from spyder.plugins.ipythonconsole.utils.kernel_handler import KernelHandler
+from spyder.utils.conda import conda_version, find_conda
 
 
 class CachedKernelMixin:
@@ -18,6 +26,7 @@ class CachedKernelMixin:
     def __init__(self):
         super().__init__()
         self._cached_kernel_properties = None
+        self._conda_exec = find_conda()
 
     def close_cached_kernel(self):
         """Close the cached kernel."""
@@ -58,16 +67,31 @@ class CachedKernelMixin:
         # Cache another kernel for next time.
         new_kernel_handler = KernelHandler.new_from_spec(kernel_spec)
 
-        if not cache:
-            # remove/don't use cache if requested
+        # Don't use cache if requested or needed
+        if (
+            not cache
+            # Conda 25.3.0 changed the way env activation works, which makes
+            # activating kernels fail when using cached kernels.
+            # Fixes spyder-ide/spyder#24132
+            or (
+                os.name == "nt"
+                and self._conda_exec is not None  # See spyder-ide/spyder#24421
+                and "conda" in osp.basename(self._conda_exec)
+                and conda_version() in (parse("25.3.0"), parse("25.3.1"))
+            )
+        ):
             self.close_cached_kernel()
             return new_kernel_handler
 
-        # Check cached kernel has the same configuration as is being asked
+        # Check cached kernel has the same configuration as is being asked or
+        # it crashed.
         cached_kernel_handler = None
         if self._cached_kernel_properties is not None:
             cached_kernel_handler = self._cached_kernel_properties[-1]
-            if not self.check_cached_kernel_spec(kernel_spec):
+            if (
+                not self.check_cached_kernel_spec(kernel_spec)
+                or cached_kernel_handler._init_stderr
+            ):
                 # Close the kernel
                 self.close_cached_kernel()
                 cached_kernel_handler = None

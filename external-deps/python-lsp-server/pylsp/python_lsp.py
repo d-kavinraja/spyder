@@ -1,23 +1,28 @@
 # Copyright 2017-2020 Palantir Technologies, Inc.
 # Copyright 2021- Python Language Server Contributors.
 
-from functools import partial
 import logging
 import os
 import socketserver
+import sys
 import threading
 import uuid
-from typing import List, Dict, Any
-import ujson as json
+from functools import partial
+from typing import Any
+
+try:
+    import ujson as json
+except Exception:
+    import json
 
 from pylsp_jsonrpc.dispatchers import MethodDispatcher
 from pylsp_jsonrpc.endpoint import Endpoint
 from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 
-from . import lsp, _utils, uris
-from .config import config
-from .workspace import Workspace, Document, Notebook, Cell
+from . import _utils, lsp, uris
 from ._version import __version__
+from .config import config
+from .workspace import Cell, Document, Notebook, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -34,30 +39,28 @@ class _StreamHandlerWrapper(socketserver.StreamRequestHandler):
 
     delegate = None
 
-    def setup(self):
+    def setup(self) -> None:
         super().setup()
         self.delegate = self.DELEGATE_CLASS(self.rfile, self.wfile)
 
-    def handle(self):
+    def handle(self) -> None:
         try:
             self.delegate.start()
         except OSError as e:
             if os.name == "nt":
                 # Catch and pass on ConnectionResetError when parent process
                 # dies
-                # pylint: disable=no-member, undefined-variable
                 if isinstance(e, WindowsError) and e.winerror == 10054:
                     pass
 
         self.SHUTDOWN_CALL()
 
 
-def start_tcp_lang_server(bind_addr, port, check_parent_process, handler_class):
+def start_tcp_lang_server(bind_addr, port, check_parent_process, handler_class) -> None:
     if not issubclass(handler_class, PythonLSPServer):
         raise ValueError("Handler class must be an instance of PythonLSPServer")
 
     def shutdown_server(check_parent_process, *args):
-        # pylint: disable=unused-argument
         if check_parent_process:
             log.debug("Shutting down server")
             # Shutdown call must be done on a thread, to prevent deadlocks
@@ -69,9 +72,13 @@ def start_tcp_lang_server(bind_addr, port, check_parent_process, handler_class):
         handler_class.__name__ + "Handler",
         (_StreamHandlerWrapper,),
         {
-            "DELEGATE_CLASS": partial(
-                handler_class, check_parent_process=check_parent_process
-            ),
+            # We need to wrap this in staticmethod due to the changes to
+            # functools.partial in Python 3.14+
+            "DELEGATE_CLASS": staticmethod(
+                partial(handler_class, check_parent_process=check_parent_process)
+            )
+            if sys.version_info >= (3, 14)
+            else partial(handler_class, check_parent_process=check_parent_process),
             "SHUTDOWN_CALL": partial(shutdown_server, check_parent_process),
         },
     )
@@ -91,7 +98,7 @@ def start_tcp_lang_server(bind_addr, port, check_parent_process, handler_class):
         server.server_close()
 
 
-def start_io_lang_server(rfile, wfile, check_parent_process, handler_class):
+def start_io_lang_server(rfile, wfile, check_parent_process, handler_class) -> None:
     if not issubclass(handler_class, PythonLSPServer):
         raise ValueError("Handler class must be an instance of PythonLSPServer")
     log.info("Starting %s IO language server", handler_class.__name__)
@@ -99,23 +106,24 @@ def start_io_lang_server(rfile, wfile, check_parent_process, handler_class):
     server.start()
 
 
-def start_ws_lang_server(port, check_parent_process, handler_class):
+def start_ws_lang_server(port, check_parent_process, handler_class) -> None:
     if not issubclass(handler_class, PythonLSPServer):
         raise ValueError("Handler class must be an instance of PythonLSPServer")
-
-    # pylint: disable=import-outside-toplevel
 
     # imports needed only for websockets based server
     try:
         import asyncio
         from concurrent.futures import ThreadPoolExecutor
+
         import websockets
     except ImportError as e:
         raise ImportError(
-            "websocket modules missing. Please run pip install 'python-lsp-server[websockets]"
+            "websocket modules missing. Please run: pip install 'python-lsp-server[websockets]'"
         ) from e
 
     with ThreadPoolExecutor(max_workers=10) as tpool:
+        send_queue = None
+        loop = None
 
         async def pylsp_ws(websocket):
             log.debug("Creating LSP object")
@@ -135,26 +143,30 @@ def start_ws_lang_server(port, check_parent_process, handler_class):
             async for message in websocket:
                 try:
                     log.debug("consuming payload and feeding it to LSP handler")
-                    # pylint: disable=c-extension-no-member
                     request = json.loads(message)
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(tpool, pylsp_handler.consume, request)
-                except Exception as e:  # pylint: disable=broad-except
+                except Exception as e:
                     log.exception("Failed to process request %s, %s", message, str(e))
 
         def send_message(message, websocket):
             """Handler to send responses of  processed requests to respective web socket clients"""
             try:
-                # pylint: disable=c-extension-no-member
                 payload = json.dumps(message, ensure_ascii=False)
-                asyncio.run(websocket.send(payload))
-            except Exception as e:  # pylint: disable=broad-except
+                loop.call_soon_threadsafe(send_queue.put_nowait, (payload, websocket))
+            except Exception as e:
                 log.exception("Failed to write message %s, %s", message, str(e))
 
         async def run_server():
+            nonlocal send_queue, loop
+            send_queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
             async with websockets.serve(pylsp_ws, port=port):
-                # runs forever
-                await asyncio.Future()
+                while 1:
+                    # Wait until payload is available for sending
+                    payload, websocket = await send_queue.get()
+                    await websocket.send(payload)
 
         asyncio.run(run_server())
 
@@ -164,11 +176,9 @@ class PythonLSPServer(MethodDispatcher):
     https://github.com/Microsoft/language-server-protocol/blob/master/versions/protocol-1-x.md
     """
 
-    # pylint: disable=too-many-public-methods,redefined-builtin
-
     def __init__(
         self, rx, tx, check_parent_process=False, consumer=None, *, endpoint_cls=None
-    ):
+    ) -> None:
         self.workspace = None
         self.config = None
         self.root_uri = None
@@ -201,11 +211,11 @@ class PythonLSPServer(MethodDispatcher):
         self._dispatchers = []
         self._shutdown = False
 
-    def start(self):
+    def start(self) -> None:
         """Entry point for the server."""
         self._jsonrpc_stream_reader.listen(self._endpoint.consume)
 
-    def consume(self, message):
+    def consume(self, message) -> None:
         """Entry point for consumer based server. Alternative to stream listeners."""
         # assuming message will be JSON
         self._endpoint.consume(message)
@@ -229,9 +239,10 @@ class PythonLSPServer(MethodDispatcher):
 
         raise KeyError()
 
-    def m_shutdown(self, **_kwargs):
+    def m_shutdown(self, **_kwargs) -> None:
         for workspace in self.workspaces.values():
             workspace.close()
+        self._hook("pylsp_shutdown")
         self._shutdown = True
 
     def m_invalid_request_after_shutdown(self, **_kwargs):
@@ -242,7 +253,7 @@ class PythonLSPServer(MethodDispatcher):
             }
         }
 
-    def m_exit(self, **_kwargs):
+    def m_exit(self, **_kwargs) -> None:
         self._endpoint.shutdown()
         if self._jsonrpc_stream_reader is not None:
             self._jsonrpc_stream_reader.close()
@@ -279,6 +290,7 @@ class PythonLSPServer(MethodDispatcher):
             "documentRangeFormattingProvider": True,
             "documentSymbolProvider": True,
             "definitionProvider": True,
+            "typeDefinitionProvider": True,
             "executeCommandProvider": {
                 "commands": flatten(self._hook("pylsp_commands"))
             },
@@ -295,7 +307,7 @@ class PythonLSPServer(MethodDispatcher):
                 "openClose": True,
             },
             "notebookDocumentSync": {
-                "notebookSelector": {"cells": [{"language": "python"}]}
+                "notebookSelector": [{"cells": [{"language": "python"}]}]
             },
             "workspace": {
                 "workspaceFolders": {"supported": True, "changeNotifications": True}
@@ -382,10 +394,10 @@ class PythonLSPServer(MethodDispatcher):
             },
         }
 
-    def m_initialized(self, **_kwargs):
+    def m_initialized(self, **_kwargs) -> None:
         self._hook("pylsp_initialized")
 
-    def code_actions(self, doc_uri, range, context):
+    def code_actions(self, doc_uri: str, range: dict, context: dict):
         return flatten(
             self._hook("pylsp_code_actions", doc_uri, range=range, context=context)
         )
@@ -394,7 +406,16 @@ class PythonLSPServer(MethodDispatcher):
         return flatten(self._hook("pylsp_code_lens", doc_uri))
 
     def completions(self, doc_uri, position):
-        completions = self._hook("pylsp_completions", doc_uri, position=position)
+        workspace = self._match_uri_to_workspace(doc_uri)
+        document = workspace.get_document(doc_uri)
+        ignored_names = None
+        if isinstance(document, Cell):
+            # We need to get the ignored names from the whole notebook document
+            notebook_document = workspace.get_maybe_document(document.notebook_uri)
+            ignored_names = notebook_document.jedi_names(doc_uri)
+        completions = self._hook(
+            "pylsp_completions", doc_uri, position=position, ignored_names=ignored_names
+        )
         return {"isIncomplete": False, "items": flatten(completions)}
 
     def completion_item_resolve(self, completion_item):
@@ -405,6 +426,9 @@ class PythonLSPServer(MethodDispatcher):
 
     def definitions(self, doc_uri, position):
         return flatten(self._hook("pylsp_definitions", doc_uri, position=position))
+
+    def type_definition(self, doc_uri, position):
+        return self._hook("pylsp_type_definition", doc_uri, position=position)
 
     def document_symbols(self, doc_uri):
         return flatten(self._hook("pylsp_document_symbols", doc_uri))
@@ -431,23 +455,27 @@ class PythonLSPServer(MethodDispatcher):
         return self._hook("pylsp_hover", doc_uri, position=position) or {"contents": ""}
 
     @_utils.debounce(LINT_DEBOUNCE_S, keyed_by="doc_uri")
-    def lint(self, doc_uri, is_saved):
+    def lint(self, doc_uri, is_saved) -> None:
         # Since we're debounced, the document may no longer be open
         workspace = self._match_uri_to_workspace(doc_uri)
         document_object = workspace.documents.get(doc_uri, None)
         if isinstance(document_object, Document):
-            self._lint_text_document(doc_uri, workspace, is_saved=is_saved)
+            self._lint_text_document(
+                doc_uri, workspace, is_saved, document_object.version
+            )
         elif isinstance(document_object, Notebook):
             self._lint_notebook_document(document_object, workspace)
 
-    def _lint_text_document(self, doc_uri, workspace, is_saved):
+    def _lint_text_document(
+        self, doc_uri, workspace, is_saved, doc_version=None
+    ) -> None:
         workspace.publish_diagnostics(
-            doc_uri, flatten(self._hook("pylsp_lint", doc_uri, is_saved=is_saved))
+            doc_uri,
+            flatten(self._hook("pylsp_lint", doc_uri, is_saved=is_saved)),
+            doc_version,
         )
 
-    def _lint_notebook_document(
-        self, notebook_document, workspace
-    ):  # pylint: disable=too-many-locals
+    def _lint_notebook_document(self, notebook_document, workspace) -> None:
         """
         Lint a notebook document.
 
@@ -461,7 +489,7 @@ class PythonLSPServer(MethodDispatcher):
         random_uri = str(uuid.uuid4())
 
         # cell_list helps us map the diagnostics back to the correct cell later.
-        cell_list: List[Dict[str, Any]] = []
+        cell_list: list[dict[str, Any]] = []
 
         offset = 0
         total_source = ""
@@ -537,7 +565,7 @@ class PythonLSPServer(MethodDispatcher):
 
     def m_notebook_document__did_open(
         self, notebookDocument=None, cellTextDocuments=None, **_kwargs
-    ):
+    ) -> None:
         workspace = self._match_uri_to_workspace(notebookDocument["uri"])
         workspace.put_notebook_document(
             notebookDocument["uri"],
@@ -558,7 +586,7 @@ class PythonLSPServer(MethodDispatcher):
 
     def m_notebook_document__did_close(
         self, notebookDocument=None, cellTextDocuments=None, **_kwargs
-    ):
+    ) -> None:
         workspace = self._match_uri_to_workspace(notebookDocument["uri"])
         for cell in cellTextDocuments or []:
             workspace.publish_diagnostics(cell["uri"], [])
@@ -567,7 +595,7 @@ class PythonLSPServer(MethodDispatcher):
 
     def m_notebook_document__did_change(
         self, notebookDocument=None, change=None, **_kwargs
-    ):
+    ) -> None:
         """
         Changes to the notebook document.
 
@@ -641,12 +669,12 @@ class PythonLSPServer(MethodDispatcher):
                     workspace.update_document(cell_uri, cell["changes"][0])
         self.lint(notebookDocument["uri"], is_saved=True)
 
-    def m_text_document__did_close(self, textDocument=None, **_kwargs):
+    def m_text_document__did_close(self, textDocument=None, **_kwargs) -> None:
         workspace = self._match_uri_to_workspace(textDocument["uri"])
         workspace.publish_diagnostics(textDocument["uri"], [])
         workspace.rm_document(textDocument["uri"])
 
-    def m_text_document__did_open(self, textDocument=None, **_kwargs):
+    def m_text_document__did_open(self, textDocument=None, **_kwargs) -> None:
         workspace = self._match_uri_to_workspace(textDocument["uri"])
         workspace.put_document(
             textDocument["uri"],
@@ -658,7 +686,7 @@ class PythonLSPServer(MethodDispatcher):
 
     def m_text_document__did_change(
         self, contentChanges=None, textDocument=None, **_kwargs
-    ):
+    ) -> None:
         workspace = self._match_uri_to_workspace(textDocument["uri"])
         for change in contentChanges:
             workspace.update_document(
@@ -666,7 +694,7 @@ class PythonLSPServer(MethodDispatcher):
             )
         self.lint(textDocument["uri"], is_saved=False)
 
-    def m_text_document__did_save(self, textDocument=None, **_kwargs):
+    def m_text_document__did_save(self, textDocument=None, **_kwargs) -> None:
         self.lint(textDocument["uri"], is_saved=True)
         self.document_did_save(textDocument["uri"])
 
@@ -678,7 +706,42 @@ class PythonLSPServer(MethodDispatcher):
     def m_text_document__code_lens(self, textDocument=None, **_kwargs):
         return self.code_lens(textDocument["uri"])
 
+    def _cell_document__completion(self, cellDocument, position=None, **_kwargs):
+        workspace = self._match_uri_to_workspace(cellDocument.notebook_uri)
+        notebookDocument = workspace.get_maybe_document(cellDocument.notebook_uri)
+        if notebookDocument is None:
+            raise ValueError("Invalid notebook document")
+
+        cell_data = notebookDocument.cell_data()
+
+        # Concatenate all cells to be a single temporary document
+        total_source = "\n".join(data["source"] for data in cell_data.values())
+        with workspace.temp_document(total_source) as temp_uri:
+            # update position to be the position in the temp document
+            if position is not None:
+                position["line"] += cell_data[cellDocument.uri]["line_start"]
+
+            completions = self.completions(temp_uri, position)
+
+            # Translate temp_uri locations to cell document locations
+            for item in completions.get("items", []):
+                if item.get("data", {}).get("doc_uri") == temp_uri:
+                    item["data"]["doc_uri"] = cellDocument.uri
+
+            # Copy LAST_JEDI_COMPLETIONS to cell document so that completionItem/resolve will work
+            tempDocument = workspace.get_document(temp_uri)
+            cellDocument.shared_data["LAST_JEDI_COMPLETIONS"] = (
+                tempDocument.shared_data.get("LAST_JEDI_COMPLETIONS", None)
+            )
+
+            return completions
+
     def m_text_document__completion(self, textDocument=None, position=None, **_kwargs):
+        # textDocument here is just a dict with a uri
+        workspace = self._match_uri_to_workspace(textDocument["uri"])
+        document = workspace.get_document(textDocument["uri"])
+        if isinstance(document, Cell):
+            return self._cell_document__completion(document, position, **_kwargs)
         return self.completions(textDocument["uri"], position)
 
     def _cell_document__definition(self, cellDocument, position=None, **_kwargs):
@@ -723,6 +786,11 @@ class PythonLSPServer(MethodDispatcher):
             return self._cell_document__definition(document, position, **_kwargs)
         return self.definitions(textDocument["uri"], position)
 
+    def m_text_document__type_definition(
+        self, textDocument=None, position=None, **_kwargs
+    ):
+        return self.type_definition(textDocument["uri"], position)
+
     def m_text_document__document_highlight(
         self, textDocument=None, position=None, **_kwargs
     ):
@@ -761,17 +829,16 @@ class PythonLSPServer(MethodDispatcher):
     ):
         return self.signature_help(textDocument["uri"], position)
 
-    def m_workspace__did_change_configuration(self, settings=None):
+    def m_workspace__did_change_configuration(self, settings=None) -> None:
         if self.config is not None:
             self.config.update((settings or {}).get("pylsp", {}))
         for workspace in self.workspaces.values():
             workspace.update_config(settings)
+            self._hook("pylsp_workspace_configuration_changed")
             for doc_uri in workspace.documents:
                 self.lint(doc_uri, is_saved=False)
 
-    def m_workspace__did_change_workspace_folders(
-        self, event=None, **_kwargs
-    ):  # pylint: disable=too-many-locals
+    def m_workspace__did_change_workspace_folders(self, event=None, **_kwargs):
         if event is None:
             return
         added = event.get("added", [])

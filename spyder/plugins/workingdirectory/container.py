@@ -25,6 +25,7 @@ from spyder.api.translations import _
 from spyder.api.widgets.main_container import PluginMainContainer
 from spyder.api.widgets.toolbars import ApplicationToolbar
 from spyder.config.base import get_home_dir
+from spyder.plugins.toolbar.api import ApplicationToolbars
 from spyder.utils.misc import getcwd_or_home
 from spyder.utils.stylesheet import APP_TOOLBAR_STYLESHEET
 from spyder.widgets.comboboxes import PathComboBox
@@ -53,10 +54,6 @@ class WorkingDirectoryToolbarItems:
 
 # ---- Widgets
 # ----------------------------------------------------------------------------
-class WorkingDirectoryToolbar(ApplicationToolbar):
-    ID = 'working_directory_toolbar'
-
-
 class WorkingDirectoryComboBox(PathComboBox):
     """Working directory combo box."""
 
@@ -82,13 +79,10 @@ class WorkingDirectoryComboBox(PathComboBox):
         self.setToolTip(self.currentText())
 
     def focusOutEvent(self, event):
-        """Handle focus out event restoring the last valid selected path."""
-        if self.add_current_text_if_valid():
-            self.selected()
-            self.hide_completer()
-        hide_status = getattr(self.lineEdit(), 'hide_status_icon', None)
-        if hide_status:
-            hide_status()
+        """
+        Handle focus out event validating current path.
+        """
+        self.add_current_text_if_valid()
         super().focusOutEvent(event)
 
     # ---- Own methods
@@ -111,7 +105,7 @@ class WorkingDirectoryComboBox(PathComboBox):
 
             # If the directory is actually a file, open containing directory
             if osp.isfile(directory):
-                file = osp.basename(directory)
+                file = directory
                 directory = osp.dirname(directory)
 
             # If the directory name is malformed, open parent directory
@@ -128,8 +122,9 @@ class WorkingDirectoryComboBox(PathComboBox):
         directory, file, line_number = self.valid_text()
         if file:
             self.edit_goto.emit(file, line_number, "")
-        if directory != self.currentText():
+        if directory and directory != self.currentText():
             self.add_text(directory)
+            self.selected()
         if directory:
             return True
 
@@ -162,7 +157,7 @@ class WorkingDirectoryContainer(PluginMainContainer):
     Parameters
     ----------
     new_working_directory: str
-        The new new working directory path.
+        The new working directory path.
     """
 
     edit_goto = Signal(str, int, str)
@@ -185,10 +180,15 @@ class WorkingDirectoryContainer(PluginMainContainer):
         # Variables
         self.history = self.get_conf('history', [])
         self.histindex = None
+        self.server_id = None
 
         # Widgets
         title = _('Current working directory')
-        self.toolbar = WorkingDirectoryToolbar(self, title)
+        self.toolbar = ApplicationToolbar(
+            self,
+            ApplicationToolbars.WorkingDirectory,
+            title
+        )
         self.pathedit = WorkingDirectoryComboBox(self)
         spacer = WorkingDirectorySpacer(self)
 
@@ -201,9 +201,10 @@ class WorkingDirectoryContainer(PluginMainContainer):
         # Signals
         self.pathedit.open_dir.connect(self.chdir)
         self.pathedit.edit_goto.connect(self.edit_goto)
-        self.pathedit.activated[str].connect(self.chdir)
+        self.pathedit.textActivated.connect(self.chdir)
 
         # Actions
+        # TODO: Previous and Next actions not being used?
         self.previous_action = self.create_action(
             WorkingDirectoryActions.Previous,
             text=_('Back'),
@@ -218,14 +219,14 @@ class WorkingDirectoryContainer(PluginMainContainer):
             icon=self.create_icon('next'),
             triggered=self._next_directory,
         )
-        browse_action = self.create_action(
+        self.browse_action = self.create_action(
             WorkingDirectoryActions.Browse,
             text=_('Browse a working directory'),
             tip=_('Browse a working directory'),
             icon=self.create_icon('DirOpenIcon'),
             triggered=self._select_directory,
         )
-        parent_action = self.create_action(
+        self.parent_action = self.create_action(
             WorkingDirectoryActions.Parent,
             text=_('Change to parent directory'),
             tip=_('Change to parent directory'),
@@ -233,7 +234,12 @@ class WorkingDirectoryContainer(PluginMainContainer):
             triggered=self._parent_directory,
         )
 
-        for item in [spacer, self.pathedit, browse_action, parent_action]:
+        for item in [
+            spacer,
+            self.pathedit,
+            self.browse_action,
+            self.parent_action,
+        ]:
             self.add_item_to_toolbar(
                 item,
                 self.toolbar,
@@ -241,12 +247,22 @@ class WorkingDirectoryContainer(PluginMainContainer):
             )
 
     def update_actions(self):
-        self.previous_action.setEnabled(
-            self.histindex is not None and self.histindex > 0)
-        self.next_action.setEnabled(
-            self.histindex is not None
-            and self.histindex < len(self.history) - 1
-        )
+        if self.server_id:
+            self.pathedit.setEnabled(False)
+            self.browse_action.setEnabled(False)
+            self.parent_action.setEnabled(False)
+        else:
+            self.pathedit.setEnabled(True)
+            self.browse_action.setEnabled(True)
+            self.parent_action.setEnabled(True)
+
+            # TODO: Seems like these actions are not used
+            self.previous_action.setEnabled(
+                self.histindex is not None and self.histindex > 0)
+            self.next_action.setEnabled(
+                self.histindex is not None
+                and self.histindex < len(self.history) - 1
+            )
 
     @on_conf_change(option='history')
     def on_history_update(self, value):
@@ -280,7 +296,7 @@ class WorkingDirectoryContainer(PluginMainContainer):
         return workdir
 
     @Slot()
-    def _select_directory(self, directory=None):
+    def _select_directory(self):
         """
         Select working directory.
 
@@ -293,14 +309,13 @@ class WorkingDirectoryContainer(PluginMainContainer):
         -----
         If directory is None, a get directory dialog will be used.
         """
-        if directory is None:
-            self.sig_redirect_stdio_requested.emit(False)
-            directory = getexistingdirectory(
-                self,
-                _("Select directory"),
-                getcwd_or_home(),
-            )
-            self.sig_redirect_stdio_requested.emit(True)
+        self.sig_redirect_stdio_requested.emit(False)
+        directory = getexistingdirectory(
+            self,
+            _("Select directory"),
+            getcwd_or_home(),
+        )
+        self.sig_redirect_stdio_requested.emit(True)
 
         if directory:
             self.chdir(directory)
@@ -338,7 +353,10 @@ class WorkingDirectoryContainer(PluginMainContainer):
     @Slot(str)
     @Slot(str, bool)
     @Slot(str, bool, bool)
-    def chdir(self, directory, browsing_history=False, emit=True):
+    @Slot(str, bool, bool, str)
+    def chdir(
+        self, directory, browsing_history=False, emit=True, server_id=None
+    ):
         """
         Set `directory` as working directory.
 
@@ -351,28 +369,40 @@ class WorkingDirectoryContainer(PluginMainContainer):
         emit: bool, optional
             Emit a signal when changing the working directory.
             Default is True.
+        server_id: str, optional
+            The server identification from where the directory is reachable.
+            Default is None.
         """
-        if directory:
+        self.server_id = server_id
+
+        if directory and not server_id:
             directory = osp.abspath(str(directory))
 
         # Working directory history management
-        if browsing_history:
-            directory = self.history[self.histindex]
-        elif directory in self.history:
-            self.histindex = self.history.index(directory)
-        else:
-            if self.histindex is None:
-                self.history = []
+        # TODO: Each host/server requires an independent history
+        # Possibly handle current history with `history` as it is but populate it
+        # with entry from a dict that contains all hosts histories depending
+        # on server_id value passed:
+        #       {"<server_id>": {"history": []}}
+        if not server_id:
+            if browsing_history:
+                directory = self.history[self.histindex]
+            elif directory in self.history:
+                self.histindex = self.history.index(directory)
             else:
-                self.history = self.history[:self.histindex + 1]
+                if self.histindex is None:
+                    self.history = []
+                else:
+                    self.history = self.history[:self.histindex + 1]
 
-            self.history.append(directory)
-            self.histindex = len(self.history) - 1
+                self.history.append(directory)
+                self.histindex = len(self.history) - 1
 
         # Changing working directory
         try:
             logger.debug(f'Setting cwd to {directory}')
-            os.chdir(directory)
+            if not server_id:
+                os.chdir(directory)
             self.pathedit.add_text(directory)
             self.update_actions()
 

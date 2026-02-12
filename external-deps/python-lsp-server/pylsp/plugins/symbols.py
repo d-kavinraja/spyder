@@ -2,6 +2,7 @@
 # Copyright 2021- Python Language Server Contributors.
 
 import logging
+import re
 from pathlib import Path
 
 from pylsp import hookimpl
@@ -12,12 +13,6 @@ log = logging.getLogger(__name__)
 
 @hookimpl
 def pylsp_document_symbols(config, document):
-    # pylint: disable=broad-except
-    # pylint: disable=too-many-nested-blocks
-    # pylint: disable=too-many-locals
-    # pylint: disable=too-many-branches
-    # pylint: disable=too-many-statements
-
     symbols_settings = config.plugin_settings("jedi_symbols")
     all_scopes = symbols_settings.get("all_scopes", True)
     add_import_symbols = symbols_settings.get("include_import_symbols", True)
@@ -25,6 +20,9 @@ def pylsp_document_symbols(config, document):
     symbols = []
     exclude = set({})
     redefinitions = {}
+    pattern_import = re.compile(
+        r"^\s*(?!#)\s*(from\s+[.\w]+(\.[\w]+)*\s+import\s+[\w\s,()*]+|import\s+[\w\s,.*]+)"
+    )
 
     while definitions != []:
         d = definitions.pop(0)
@@ -33,7 +31,8 @@ def pylsp_document_symbols(config, document):
         if not add_import_symbols:
             # Skip if there's an import in the code the symbol is defined.
             code = d.get_line_code()
-            if " import " in code or "import " in code:
+
+            if pattern_import.match(code):
                 continue
 
             # Skip imported symbols comparing module names.
@@ -150,7 +149,7 @@ def _container(definition):
         # as children of the module.
         if parent.parent():
             return parent.name
-    except:  # pylint: disable=bare-except
+    except:
         return None
 
     return None

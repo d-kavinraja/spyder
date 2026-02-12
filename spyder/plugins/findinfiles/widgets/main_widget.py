@@ -11,9 +11,16 @@ import os.path as osp
 import re
 
 # Third party imports
-from qtpy.QtCore import Signal
+from qtpy import PYSIDE2
+from qtpy.QtCore import QEvent, Qt, Signal
 from qtpy.QtGui import QFontMetricsF
-from qtpy.QtWidgets import QInputDialog, QLabel, QStackedWidget, QVBoxLayout
+from qtpy.QtWidgets import (
+    QAction,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QToolButton,
+)
 
 # Local imports
 from spyder.api.config.decorators import on_conf_change
@@ -24,17 +31,18 @@ from spyder.plugins.findinfiles.widgets.results_browser import (
 from spyder.plugins.findinfiles.widgets.combobox import (
     MAX_PATH_HISTORY, SearchInComboBox)
 from spyder.plugins.findinfiles.widgets.search_thread import SearchThread
+from spyder.utils.icon_manager import ima
 from spyder.utils.misc import regexp_error_msg
-from spyder.utils.palette import QStylePalette, SpyderPalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.stylesheet import AppStyle
 from spyder.widgets.comboboxes import PatternComboBox
-from spyder.widgets.helperwidgets import PaneEmptyWidget
 
 
 # ---- Constants
 # -----------------------------------------------------------------------------
-MAIN_TEXT_COLOR = QStylePalette.COLOR_TEXT_1
+MAIN_TEXT_COLOR = SpyderPalette.COLOR_TEXT_1
 MAX_COMBOBOX_WIDTH = AppStyle.FindMinWidth + 80  # In pixels
+MIN_COMBOBOX_WIDTH = AppStyle.FindMinWidth - 80  # In pixels
 
 
 # ---- Enums
@@ -89,9 +97,15 @@ class FindInFilesWidget(PluginMainWidget):
     # PluginMainWidget constants
     ENABLE_SPINNER = True
     MARGIN_TOP = AppStyle.MarginSize + 5
+    SHOW_MESSAGE_WHEN_EMPTY = True
+    IMAGE_WHEN_EMPTY = "find_empty"
+    MESSAGE_WHEN_EMPTY = _("Nothing searched for yet")
+    DESCRIPTION_WHEN_EMPTY = _(
+        "Search the content of text files in any directory using the search "
+        "box."
+    )
 
     # Other constants
-    REGEX_INVALID = f"background-color:{SpyderPalette.COLOR_ERROR_2};"
     REGEX_ERROR = _("Regular expression error")
 
     # Signals
@@ -126,7 +140,10 @@ class FindInFilesWidget(PluginMainWidget):
     """
 
     def __init__(self, name=None, plugin=None, parent=None):
-        super().__init__(name, plugin, parent=parent)
+        if not PYSIDE2:
+            super().__init__(name, plugin, parent=parent)
+        else:
+            PluginMainWidget.__init__(self, name, plugin, parent=parent)
         self.set_conf('text_color', MAIN_TEXT_COLOR)
         self.set_conf('hist_limit', MAX_PATH_HISTORY)
 
@@ -140,6 +157,8 @@ class FindInFilesWidget(PluginMainWidget):
         self._search_in_label_width = None
         self._exclude_label_width = None
         self._is_shown = False
+        self._is_first_time = False
+        self.error_icon = ima.icon('error')
 
         search_text = self.get_conf('search_text', '')
         path_history = self.get_conf('path_history', [])
@@ -155,22 +174,34 @@ class FindInFilesWidget(PluginMainWidget):
             path_history = [path_history]
 
         # Widgets
-        self.pane_empty = PaneEmptyWidget(
-            self,
-            "find_empty",
-            _("Nothing searched for yet"),
-            _("Search the content of text files in any directory using the "
-              "search box.")
-        )
-        
         self.search_text_edit = PatternComboBox(
             self,
             items=search_text,
             adjust_to_minimum=False,
-            id_=FindInFilesWidgetToolbarItems.SearchPatternCombo
+            id_=FindInFilesWidgetToolbarItems.SearchPatternCombo,
+            items_elide_mode=Qt.ElideMiddle
         )
         self.search_text_edit.lineEdit().setPlaceholderText(
             _('Write text to search'))
+
+        self.search_text_edit.setMinimumSize(
+            MIN_COMBOBOX_WIDTH, AppStyle.FindHeight
+        )
+
+        # This is necessary to prevent the width of search_text_edit to control
+        # the width of the pane.
+        # Fixes spyder-ide/spyder#24188
+        self.search_text_edit.setMaximumWidth(MAX_COMBOBOX_WIDTH)
+
+        self.messages_action = QAction(self)
+        self.messages_action.setVisible(False)
+        self.search_text_edit.lineEdit().addAction(
+            self.messages_action, QLineEdit.TrailingPosition
+        )
+
+        self.messages_button = (
+            self.search_text_edit.lineEdit().findChildren(QToolButton)[1]
+        )
 
         self.search_in_label = QLabel(_('Search in:'))
         self.search_in_label.ID = FindInFilesWidgetToolbarItems.SearchInLabel
@@ -184,7 +215,7 @@ class FindInFilesWidget(PluginMainWidget):
             id_=FindInFilesWidgetToolbarItems.SearchInCombo
         )
         self.path_selection_combo.setMinimumSize(
-            MAX_COMBOBOX_WIDTH, AppStyle.FindHeight
+            MIN_COMBOBOX_WIDTH, AppStyle.FindHeight
         )
         self.path_selection_combo.setMaximumWidth(MAX_COMBOBOX_WIDTH)
 
@@ -195,15 +226,26 @@ class FindInFilesWidget(PluginMainWidget):
             id_=FindInFilesWidgetToolbarItems.ExcludePatternCombo
         )
         self.exclude_pattern_edit.setMinimumSize(
-            MAX_COMBOBOX_WIDTH, AppStyle.FindHeight
+            MIN_COMBOBOX_WIDTH, AppStyle.FindHeight
         )
         self.exclude_pattern_edit.setMaximumWidth(MAX_COMBOBOX_WIDTH)
+
+        self.messages_exclude_action = QAction(self)
+        self.messages_exclude_action.setVisible(False)
+        self.exclude_pattern_edit.lineEdit().addAction(
+            self.messages_exclude_action, QLineEdit.TrailingPosition
+        )
+
+        self.messages_button_exclude = (
+            self.exclude_pattern_edit.lineEdit().findChildren(QToolButton)[1]
+        )
 
         self.result_browser = ResultsBrowser(
             self,
             text_color=self.text_color,
             max_results=self.get_conf('max_results'),
         )
+        self.set_content_widget(self.result_browser)
 
         # Setup
         exclude_idx = self.get_conf('exclude_index', None)
@@ -215,14 +257,9 @@ class FindInFilesWidget(PluginMainWidget):
         self.path_selection_combo.set_current_searchpath_index(
             search_in_index)
 
-        # Layout
-        self.stacked_widget = QStackedWidget(self)
-        self.stacked_widget.addWidget(self.result_browser)
-        self.stacked_widget.addWidget(self.pane_empty)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.stacked_widget)
-        self.setLayout(layout)
+        # Install event filter for search_text_edit & exclude_pattern_edit
+        self.search_text_edit.installEventFilter(self)
+        self.exclude_pattern_edit.installEventFilter(self)
 
         # Signals
         self.path_selection_combo.sig_redirect_stdio_requested.connect(
@@ -235,6 +272,32 @@ class FindInFilesWidget(PluginMainWidget):
             self.sig_max_results_reached)
         self.result_browser.sig_max_results_reached.connect(
             self._stop_and_reset_thread)
+
+    def eventFilter(self, widget, event):
+        """
+        Event filter for search_text_edit & exclude_pattern_edit widget.
+
+        Notes
+        -----
+        * Reduce space between the messages_button and the clear one.
+        """
+        # Type check: Prevent error in PySide where 'event' may be of type
+        # QtGui.QPainter (for whatever reason).
+        if not isinstance(event, QEvent):
+            return True
+        if event.type() == QEvent.Paint:
+            if widget == self.exclude_pattern_edit:
+                self.messages_button_exclude.move(
+                    self.exclude_pattern_edit.lineEdit().width() - 42,
+                    self.messages_button_exclude.y()
+                )
+            elif widget == self.search_text_edit:                
+                self.messages_button.move(
+                    self.search_text_edit.lineEdit().width() - 42,
+                    self.messages_button.y()
+                )
+
+        return super().eventFilter(widget, event)
 
     # ---- PluginMainWidget API
     # ------------------------------------------------------------------------
@@ -301,6 +364,7 @@ class FindInFilesWidget(PluginMainWidget):
         self.set_max_results_action = self.create_action(
             FindInFilesWidgetActions.MaxResults,
             text=_('Set maximum number of results'),
+            icon=self.create_icon("transparent"),
             tip=_('Set maximum number of results'),
             triggered=lambda x=None: self.set_max_results(),
         )
@@ -348,22 +412,15 @@ class FindInFilesWidget(PluginMainWidget):
             self.set_max_results_action,
             menu=menu,
         )
-        self.set_pane_empty()
-
-    def set_pane_empty(self):
-        if self.result_browser.data:
-            self.stacked_widget.setCurrentWidget(self.result_browser)
-        else:
-            self.stacked_widget.setCurrentWidget(self.pane_empty)
 
     def update_actions(self):
         self.find_action.setIcon(self.create_icon(
-            'stop' if self.running else 'find'))
+            'stop' if self.running else 'find')
+        )
 
         if self.extras_toolbar and self.more_options_action:
             self.extras_toolbar.setVisible(
                 self.more_options_action.isChecked())
-        self.set_pane_empty()
 
     @on_conf_change(option='more_options')
     def on_more_options_update(self, value):
@@ -436,6 +493,21 @@ class FindInFilesWidget(PluginMainWidget):
 
         super().showEvent(event)
 
+    def resizeEvent(self, event):
+        """Adjustments when the widget is resized."""
+        super().resizeEvent(event)
+
+        # This is necessary to prevent the width of search_text_edit to control
+        # the width of the pane.
+        # Fixes spyder-ide/spyder#24188
+        self.search_text_edit.setMaximumWidth(self.width())
+
+        # This recomputes the result items width according to this widget's
+        # width, which makes the UI be rendered as expected.
+        # NOTE: Don't debounce or throttle `set_width` because then it wouldn't
+        # do its job as expected.
+        self.result_browser.set_width()
+
     # ---- Private API
     # ------------------------------------------------------------------------
     def _get_options(self):
@@ -447,10 +519,8 @@ class FindInFilesWidget(PluginMainWidget):
         case_sensitive = self.case_action.isChecked()
 
         # Clear fields
-        self.search_text_edit.lineEdit().setStyleSheet("")
-        self.exclude_pattern_edit.lineEdit().setStyleSheet("")
-        self.exclude_pattern_edit.setToolTip("")
-        self.search_text_edit.setToolTip("")
+        self.messages_action.setVisible(False)
+        self.messages_exclude_action.setVisible(False)
 
         utext = str(self.search_text_edit.currentText())
         if not utext:
@@ -484,10 +554,7 @@ class FindInFilesWidget(PluginMainWidget):
         if exclude:
             error_msg = regexp_error_msg(exclude)
             if error_msg:
-                exclude_edit = self.exclude_pattern_edit.lineEdit()
-                exclude_edit.setStyleSheet(self.REGEX_INVALID)
-                tooltip = self.REGEX_ERROR + ': ' + str(error_msg)
-                self.exclude_pattern_edit.setToolTip(tooltip)
+                self._show_error(str(error_msg), True)
                 return None
             else:
                 exclude = re.compile(exclude)
@@ -496,10 +563,7 @@ class FindInFilesWidget(PluginMainWidget):
         if text_re:
             error_msg = regexp_error_msg(texts[0][0])
             if error_msg:
-                self.search_text_edit.lineEdit().setStyleSheet(
-                    self.REGEX_INVALID)
-                tooltip = self.REGEX_ERROR + ': ' + str(error_msg)
-                self.search_text_edit.setToolTip(tooltip)
+                self._show_error(str(error_msg), False)
                 return None
             else:
                 texts = [(re.compile(x[0]), x[1]) for x in texts]
@@ -645,6 +709,12 @@ class FindInFilesWidget(PluginMainWidget):
         If there is no search running, this will start the search. If there is
         a search running, this will stop it.
         """
+        # Show result_browser the first time a user performs a search and leave
+        # it shown afterwards.
+        if not self._is_first_time:
+            self.show_content_widget()
+            self._is_first_time = True
+
         if self.running:
             self.stop()
         else:
@@ -737,6 +807,36 @@ class FindInFilesWidget(PluginMainWidget):
             dialog.show()
         else:
             self.set_conf('max_results', value)
+
+    # ---- Private API
+    # ------------------------------------------------------------------------
+    def _show_error(self, error_msg, exclude):
+        """
+        Show a regexp error message with an icon.
+
+        Parameters
+        ----------
+        error_msg:
+            Message to add to the action icon's tooltip.
+        exclude: bool
+            Whether to show the error in the exclude pattern combobox.
+        """
+        tooltip = self.REGEX_ERROR + ': ' + error_msg
+        icon = self.error_icon
+
+        if exclude:
+            self.messages_exclude_action.setIcon(icon)
+            self.messages_exclude_action.setToolTip(tooltip)
+            self.messages_exclude_action.setVisible(True)
+
+            tooltip_search = _("Regular expression error in Exclude field")
+            self.messages_action.setIcon(icon)
+            self.messages_action.setToolTip(tooltip_search)
+            self.messages_action.setVisible(True)
+        else:
+            self.messages_action.setIcon(icon)
+            self.messages_action.setToolTip(tooltip)
+            self.messages_action.setVisible(True)
 
 
 # ---- Test

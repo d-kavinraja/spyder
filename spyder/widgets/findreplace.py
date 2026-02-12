@@ -13,8 +13,10 @@
 
 # Standard library imports
 import re
+import sys
 
 # Third party imports
+from qtpy import PYSIDE2
 from qtpy.QtCore import QEvent, QSize, Qt, QTimer, Signal, Slot
 from qtpy.QtGui import QPixmap, QTextCursor
 from qtpy.QtWidgets import (QAction, QGridLayout, QHBoxLayout, QLabel,
@@ -22,9 +24,8 @@ from qtpy.QtWidgets import (QAction, QGridLayout, QHBoxLayout, QLabel,
                             QWidget)
 
 # Local imports
-from spyder.config.base import _
-from spyder.config.manager import CONF
-from spyder.py3compat import to_text_string
+from spyder.api.shortcuts import SpyderShortcutsMixin
+from spyder.api.translations import _
 from spyder.utils.icon_manager import ima
 from spyder.utils.misc import regexp_error_msg
 from spyder.plugins.editor.utils.editor import TextHelper
@@ -54,8 +55,12 @@ class SearchText(PatternComboBox):
         return QSize(self.recommended_width, AppStyle.FindHeight)
 
 
-class FindReplace(QWidget):
+class FindReplace(QWidget, SpyderShortcutsMixin):
     """Find widget"""
+
+    # For shortcuts
+    CONF_SECTION = 'find_replace'
+
     TOOLTIP = {
         'regexp_error': _("Regular expression error"),
         'no_matches': _("No matches")
@@ -66,7 +71,11 @@ class FindReplace(QWidget):
     return_pressed = Signal()
 
     def __init__(self, parent, enable_replace=False):
-        QWidget.__init__(self, parent)
+        if not PYSIDE2:
+            super().__init__(parent)
+        else:
+            QWidget.__init__(self, parent)
+        SpyderShortcutsMixin.__init__(self)
         self.enable_replace = enable_replace
         self.editor = None
         self.is_code_editor = None
@@ -78,6 +87,9 @@ class FindReplace(QWidget):
             2 * AppStyle.MarginSize,
             0
         )
+        if sys.platform == "darwin":
+            # Spacing is too big on Mac, which makes the widget look bad
+            glayout.setSpacing(2 * AppStyle.MarginSize)
         self.setLayout(glayout)
 
         self.close_button = create_toolbutton(
@@ -257,7 +269,7 @@ class FindReplace(QWidget):
         # Additional adjustments
         self.search_text.setTabOrder(self.search_text, self.replace_text)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.shortcuts = self.create_shortcuts(parent)
+        self.register_shortcuts(parent)
 
         # To highlight found results in the editor
         self.highlight_timer = QTimer(self)
@@ -295,7 +307,7 @@ class FindReplace(QWidget):
             key = event.key()
             shift = event.modifiers() & Qt.ShiftModifier
 
-            if key == Qt.Key_Return:
+            if key in (Qt.Key_Return, Qt.Key_Enter):
                 if shift:
                     self.return_shift_pressed.emit()
                 else:
@@ -315,49 +327,21 @@ class FindReplace(QWidget):
 
         return super().eventFilter(widget, event)
 
-    def create_shortcuts(self, parent):
-        """Create shortcuts for this widget"""
-        # Configurable
-        findnext = CONF.config_shortcut(
-            self.find_next,
-            context='find_replace',
-            name='Find next',
-            parent=parent)
+    def register_shortcuts(self, parent):
+        """Register shortcuts for this widget."""
+        shortcuts = (
+            ('find next', self.find_next, parent),
+            ("find previous", self.find_previous, parent),
+            ('find text', self.show, parent),
+            ('replace text', self.show_replace, parent),
+            ('replace all', self.replace_find_all, parent),
+            ('hide find and replace', self.hide, self),
+        )
 
-        findprev = CONF.config_shortcut(
-            self.find_previous,
-            context='find_replace',
-            name='Find previous',
-            parent=parent)
-
-        togglefind = CONF.config_shortcut(
-            self.show,
-            context='find_replace',
-            name='Find text',
-            parent=parent)
-
-        togglereplace = CONF.config_shortcut(
-            self.show_replace,
-            context='find_replace',
-            name='Replace text',
-            parent=parent)
-
-        hide = CONF.config_shortcut(
-            self.hide,
-            context='find_replace',
-            name='hide find and replace',
-            parent=self)
-
-        return [findnext, findprev, togglefind, togglereplace, hide]
-
-    def get_shortcut_data(self):
-        """
-        Returns shortcut data, a list of tuples (shortcut, text, default)
-        shortcut (QShortcut or QAction instance)
-        text (string): action/shortcut description
-        default (string): default key sequence
-        """
-        return [sc.data for sc in self.shortcuts]
+        for name, callback, widget in shortcuts:
+            self.register_shortcut_for_widget(
+                name=name, triggered=callback, widget=widget
+            )
 
     def update_search_combo(self):
         self.search_text.lineEdit().returnPressed.emit()
@@ -392,7 +376,7 @@ class FindReplace(QWidget):
                     try:
                         cursor = self.editor.textCursor()
                         cursor.select(QTextCursor.WordUnderCursor)
-                        text = to_text_string(cursor.selectedText())
+                        text = str(cursor.selectedText())
                     except AttributeError:
                         # We can't do this for all widgets, e.g. WebView's
                         pass
@@ -542,7 +526,7 @@ class FindReplace(QWidget):
         # selection. Otherwise we show matching items.
         if multiline_replace_check and self.replace_widgets[0].isVisible():
             sel_text = self.editor.get_selected_text()
-            if len(to_text_string(sel_text).splitlines()) > 1:
+            if len(str(sel_text).splitlines()) > 1:
                 return None
         text = self.search_text.currentText()
         if len(text) == 0:
@@ -601,8 +585,8 @@ class FindReplace(QWidget):
         """Replace and find."""
         if self.editor is None:
             return
-        replace_text = to_text_string(self.replace_text.currentText())
-        search_text = to_text_string(self.search_text.currentText())
+        replace_text = str(self.replace_text.currentText())
+        search_text = str(self.search_text.currentText())
         re_pattern = None
         case = self.case_button.isChecked()
         re_flags = re.MULTILINE if case else re.IGNORECASE | re.MULTILINE
@@ -619,7 +603,7 @@ class FindReplace(QWidget):
                 return
 
         # First found
-        seltxt = to_text_string(self.editor.get_selected_text())
+        seltxt = str(self.editor.get_selected_text())
         cmptxt1 = search_text if case else search_text.lower()
         cmptxt2 = seltxt if case else seltxt.lower()
         do_replace = True
@@ -643,7 +627,7 @@ class FindReplace(QWidget):
                 cursor.removeSelectedText()
                 cursor.insertText(replace_text)
             else:
-                seltxt = to_text_string(cursor.selectedText())
+                seltxt = str(cursor.selectedText())
 
                 # Note: If the selection obtained from an editor spans a line
                 # break, the text will contain a Unicode U+2029 paragraph
@@ -679,8 +663,8 @@ class FindReplace(QWidget):
         if self.editor is None:
             return
 
-        replace_text = to_text_string(self.replace_text.currentText())
-        search_text = to_text_string(self.search_text.currentText())
+        replace_text = str(self.replace_text.currentText())
+        search_text = str(self.search_text.currentText())
         case = self.case_button.isChecked()
         word = self.words_button.isChecked()
         re_flags = re.MULTILINE if case else re.IGNORECASE | re.MULTILINE
@@ -690,6 +674,7 @@ class FindReplace(QWidget):
         else:
             pattern = re.escape(search_text)
             # re.sub processes backslashes so they must be escaped
+            # See spyder-ide/spyder#21007.
             replace_text = replace_text.replace('\\', r'\\')
 
         # Match whole words only
@@ -721,8 +706,8 @@ class FindReplace(QWidget):
     def replace_find_selection(self, focus_replace_text=False):
         """Replace and find in the current selection"""
         if self.editor is not None:
-            replace_text = to_text_string(self.replace_text.currentText())
-            search_text = to_text_string(self.search_text.currentText())
+            replace_text = str(self.replace_text.currentText())
+            search_text = str(self.search_text.currentText())
             case = self.case_button.isChecked()
             word = self.words_button.isChecked()
             re_flags = re.MULTILINE if case else re.IGNORECASE | re.MULTILINE
@@ -747,7 +732,7 @@ class FindReplace(QWidget):
                 # Do nothing with an invalid regexp
                 return
 
-            selected_text = to_text_string(self.editor.get_selected_text())
+            selected_text = str(self.editor.get_selected_text())
             replacement = re_pattern.sub(replace_text, selected_text)
             if replacement != selected_text:
                 cursor = self.editor.textCursor()

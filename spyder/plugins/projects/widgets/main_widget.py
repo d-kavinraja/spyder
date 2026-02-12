@@ -9,9 +9,11 @@
 # Standard library imports
 from collections import OrderedDict
 import configparser
+from contextlib import contextmanager
 import logging
 import os
 import os.path as osp
+import re
 import pathlib
 import shutil
 
@@ -22,12 +24,13 @@ from qtpy.QtWidgets import (
     QHBoxLayout, QInputDialog, QLabel, QMessageBox, QVBoxLayout, QWidget)
 
 # Local imports
+from spyder.api.config.decorators import on_conf_change
 from spyder.api.exceptions import SpyderAPIError
 from spyder.api.translations import _
 from spyder.api.widgets.main_widget import PluginMainWidget
 from spyder.config.base import (
     get_home_dir, get_project_config_folder, running_under_pytest)
-from spyder.config.utils import get_edit_extensions
+from spyder.config.utils import EDIT_EXTENSIONS
 from spyder.plugins.completion.api import (
     CompletionRequestTypes, FileChangeType)
 from spyder.plugins.completion.decorators import (
@@ -36,7 +39,10 @@ from spyder.plugins.explorer.api import DirViewActions
 from spyder.plugins.projects.api import (
     BaseProjectType, EmptyProject, WORKSPACE)
 from spyder.plugins.projects.utils.watcher import WorkspaceWatcher
-from spyder.plugins.projects.widgets.projectdialog import ProjectDialog
+from spyder.plugins.projects.widgets.projectdialog import (
+    is_writable,
+    ProjectDialog,
+)
 from spyder.plugins.projects.widgets.projectexplorer import (
     ProjectExplorerTreeWidget)
 from spyder.plugins.switcher.utils import get_file_icon, shorten_paths
@@ -44,7 +50,6 @@ from spyder.utils import encoding
 from spyder.utils.misc import getcwd_or_home
 from spyder.utils.programs import find_program
 from spyder.utils.workers import WorkerManager
-from spyder.widgets.helperwidgets import PaneEmptyWidget
 
 
 # For logging
@@ -75,11 +80,24 @@ class RecentProjectsMenuSections:
     Extras = 'extras_section'
 
 
+class ProjectsOptionsMenuActions:
+    SearchInSwitcher = "search_in_switcher"
+
+
 # ---- Main widget
 # -----------------------------------------------------------------------------
 @class_register
 class ProjectExplorerWidget(PluginMainWidget):
     """Project explorer main widget."""
+
+    # ---- PluginMainWidget API
+    # -------------------------------------------------------------------------
+    SHOW_MESSAGE_WHEN_EMPTY = True
+    IMAGE_WHEN_EMPTY = "projects"
+    MESSAGE_WHEN_EMPTY = _("No project opened")
+    DESCRIPTION_WHEN_EMPTY = _(
+        "Create one using the menu entry Projects > New project."
+    )
 
     # ---- Constants
     # -------------------------------------------------------------------------
@@ -177,16 +195,9 @@ class ProjectExplorerWidget(PluginMainWidget):
         self.treewidget = ProjectExplorerTreeWidget(self, self.show_hscrollbar)
         self.treewidget.setup()
         self.treewidget.setup_view()
-        self.treewidget.hide()
         self.treewidget.sig_open_file_requested.connect(
             self.sig_open_file_requested)
-
-        self.pane_empty = PaneEmptyWidget(
-            self,
-            "projects",
-            _("No project opened"),
-            _("Create one using the menu entry Projects > New project.")
-        )
+        self.set_content_widget(self.treewidget)
 
         # -- Watcher
         self.watcher = WorkspaceWatcher(self)
@@ -194,9 +205,6 @@ class ProjectExplorerWidget(PluginMainWidget):
 
         # -- Worker manager for calls to fzf
         self._worker_manager = WorkerManager(self)
-
-        # -- List of possible file extensions that can be opened in the Editor
-        self._edit_extensions = get_edit_extensions()
 
         # -- Signals
         self.sig_project_loaded.connect(self._setup_project)
@@ -211,10 +219,6 @@ class ProjectExplorerWidget(PluginMainWidget):
         self.sig_project_closed.connect(lambda p: self._clear_switcher_paths())
 
         # -- Layout
-        layout = QVBoxLayout()
-        layout.addWidget(self.pane_empty)
-        layout.addWidget(self.treewidget)
-        self.setLayout(layout)
         self.setMinimumWidth(200)
 
         # Initial setup
@@ -231,22 +235,26 @@ class ProjectExplorerWidget(PluginMainWidget):
         self.create_action(
             ProjectsActions.NewProject,
             text=_("New Project..."),
-            triggered=self.create_new_project)
+            triggered=self.create_new_project,
+            icon=self.create_icon("project_new"))
 
         self.create_action(
             ProjectsActions.OpenProject,
             text=_("Open Project..."),
-            triggered=lambda v: self.open_project())
+            triggered=lambda v: self.open_project(),
+            icon=self.create_icon("project_open"))
 
         self.close_project_action = self.create_action(
             ProjectsActions.CloseProject,
             text=_("Close Project"),
-            triggered=self.close_project)
+            triggered=self.close_project,
+            icon=self.create_icon("project_close"))
 
         self.delete_project_action = self.create_action(
             ProjectsActions.DeleteProject,
             text=_("Delete Project"),
-            triggered=self.delete_project)
+            triggered=self.delete_project,
+            icon=self.create_icon("project_delete"))
 
         self.clear_recent_projects_action = self.create_action(
             ProjectsActions.ClearRecentProjects,
@@ -255,30 +263,45 @@ class ProjectExplorerWidget(PluginMainWidget):
 
         self.max_recent_action = self.create_action(
             ProjectsActions.MaxRecent,
-            text=_("Maximum number of recent projects..."),
+            text=_("Maximum number of recent projects"),
+            icon=self.create_icon("transparent"),
             triggered=self.change_max_recent_projects)
 
         self.recent_project_menu = self.create_menu(
             ProjectsMenuSubmenus.RecentProjects,
-            _("Recent Projects")
+            _("Recent Projects"),
+            reposition=False
         )
         self.recent_project_menu.aboutToShow.connect(self._setup_menu_actions)
         self._setup_menu_actions()
 
+        # We need to give users a way to disable searching files in the
+        # switcher because in some situations it introduces delays in the
+        # switcher or Spyder itself.
+        # Fixes spyder-ide/spyder#22641
+        search_in_switcher_action = self.create_action(
+            ProjectsOptionsMenuActions.SearchInSwitcher,
+            text=_("Search project files in the switcher"),
+            toggled=True,
+            option='search_files_in_switcher',
+        )
+
         # Add some DirView actions to the Options menu for easy access.
-        menu = self.get_options_menu()
         hidden_action = self.get_action(DirViewActions.ToggleHiddenFiles)
         single_click_action = self.get_action(DirViewActions.ToggleSingleClick)
 
-        for action in [hidden_action, single_click_action]:
+        # Options menu
+        menu = self.get_options_menu()
+        for action in [
+            hidden_action,
+            single_click_action,
+            search_in_switcher_action,
+        ]:
             self.add_item_to_menu(
                 action,
                 menu=menu,
-                section=ProjectExplorerOptionsMenuSections.Main)
-            
-    def set_pane_empty(self):
-        self.treewidget.hide()
-        self.pane_empty.show()
+                section=ProjectExplorerOptionsMenuSections.Main
+            )
 
     def update_actions(self):
         pass
@@ -293,7 +316,7 @@ class ProjectExplorerWidget(PluginMainWidget):
         """Create new project."""
         self._unmaximize()
 
-        dlg = ProjectDialog(self, project_types=self.get_project_types())
+        dlg = ProjectDialog(self)
         result = dlg.exec_()
         data = dlg.project_data
         root_path = data.get("root_path", None)
@@ -302,7 +325,6 @@ class ProjectExplorerWidget(PluginMainWidget):
         if result:
             logger.debug(f'Creating a project at {root_path}')
             self.create_project(root_path, project_type_id=project_type)
-            dlg.close()
 
     def create_project(self, root_path, project_type_id=EmptyProject.ID):
         """Create a new project."""
@@ -347,11 +369,29 @@ class ProjectExplorerWidget(PluginMainWidget):
             path = encoding.to_unicode_from_fs(path)
             if not self.is_valid_project(path):
                 if path:
-                    QMessageBox.critical(
+                    buttons = QMessageBox.Yes | QMessageBox.No
+                    answer = QMessageBox.warning(
                         self,
-                        _('Error'),
-                        _("<b>%s</b> is not a Spyder project!") % path,
+                        _("Warning"),
+                        _("<b>%s</b> is not a Spyder project.<br><br>"
+                          "Do you want to create a project in this "
+                          "location?") % path,
+                        buttons
                     )
+
+                    if answer == QMessageBox.Yes:
+                        valid = self._is_valid_location(path)
+                        if valid[0]:
+                            self.create_project(path)
+                        else:
+                            QMessageBox.critical(
+                                self,
+                                _("Error"),
+                                _(
+                                    "It was not possible to create a project "
+                                    "in <b>{}</b>. The reason is:<br><br>{}"
+                                ).format(path, valid[1])
+                            )
                 return
         else:
             path = encoding.to_unicode_from_fs(path)
@@ -395,13 +435,13 @@ class ProjectExplorerWidget(PluginMainWidget):
         self._add_to_recent(path)
 
         self.set_conf('current_project_path', self.get_active_project_path())
-
         self._setup_menu_actions()
 
-        if workdir and osp.isdir(workdir):
-            self.sig_project_loaded.emit(workdir)
-        else:
-            self.sig_project_loaded.emit(path)
+        with self._disable_pdb_prevent_closing():
+            if workdir and osp.isdir(workdir):
+                self.sig_project_loaded.emit(workdir)
+            else:
+                self.sig_project_loaded.emit(path)
 
         self.watcher.start(path)
 
@@ -435,8 +475,9 @@ class ProjectExplorerWidget(PluginMainWidget):
             self.set_conf('current_project_path', None)
             self._setup_menu_actions()
 
-            self.sig_project_closed.emit(path)
-            self.sig_project_closed[bool].emit(True)
+            with self._disable_pdb_prevent_closing():
+                self.sig_project_closed.emit(path)
+                self.sig_project_closed[bool].emit(True)
 
             # Hide pane.
             self.set_conf('visible_if_project_open', self.isVisible())
@@ -513,9 +554,9 @@ class ProjectExplorerWidget(PluginMainWidget):
                 self.recent_projects = self._get_valid_recent_projects(
                     self.recent_projects)[:max_projects]
 
-    def reopen_last_project(self):
+    def reopen_last_project(self, working_directory, restart_console):
         """
-        Reopen the active project when Spyder was closed last time, if any
+        Reopen the active project when Spyder was closed last time, if any.
         """
         current_project_path = self.get_conf('current_project_path',
                                              default=None)
@@ -525,12 +566,11 @@ class ProjectExplorerWidget(PluginMainWidget):
             current_project_path and
             self.is_valid_project(current_project_path)
         ):
-            cli_options = self.get_plugin().get_command_line_options()
             self.open_project(
                 path=current_project_path,
-                restart_console=True,
+                restart_console=restart_console,
                 save_previous_files=False,
-                workdir=cli_options.working_directory
+                workdir=working_directory,
             )
             self._load_config()
 
@@ -840,13 +880,16 @@ class ProjectExplorerWidget(PluginMainWidget):
 
     def _clear(self):
         """Show an empty view"""
-        self.treewidget.hide()
-        self.pane_empty.show()
+        if self.get_conf("show_message_when_panes_are_empty", section="main"):
+            super().show_empty_message()
+        else:
+            # This removes the widget's contents to show an empty pane
+            self.treewidget.set_root_path("")
 
     def _setup_project(self, directory):
         """Setup project"""
-        self.pane_empty.hide()
-        self.treewidget.show()
+        if self.get_conf("show_message_when_panes_are_empty", section="main"):
+            self.show_content_widget()
 
         # Setup the directory shown by the tree
         self._set_project_dir(directory)
@@ -931,7 +974,7 @@ class ProjectExplorerWidget(PluginMainWidget):
                         action = self.create_action(
                             name,
                             text=name,
-                            icon=self.create_icon('project'),
+                            icon=self.create_icon('project_spyder'),
                             triggered=self._build_opener(project),
                         )
 
@@ -949,7 +992,7 @@ class ProjectExplorerWidget(PluginMainWidget):
                 section=RecentProjectsMenuSections.Extras)
 
         self._update_project_actions()
-        self.recent_project_menu._render()
+        self.recent_project_menu.render()
 
     def _build_opener(self, project):
         """Build function opening passed project"""
@@ -995,6 +1038,50 @@ class ProjectExplorerWidget(PluginMainWidget):
 
         return valid_projects
 
+    @contextmanager
+    def _disable_pdb_prevent_closing(self):
+        """
+        Context manager to disable the pdb_prevent_closing option before
+        opening/closing the previous/current open project files.
+
+        Notes
+        -----
+        * This is necessary to correctly do that when a console was left in
+          debugging mode.
+        """
+        try:
+            pdb_prevent_closing = self.get_conf(
+                "pdb_prevent_closing", section="debugger"
+            )
+            self.set_conf("pdb_prevent_closing", False, section="debugger")
+            yield
+        finally:
+            self.set_conf(
+                "pdb_prevent_closing", pdb_prevent_closing, section="debugger"
+            )
+
+    def _is_valid_location(self, location: str):
+        valid = True
+        reason = ""
+        if not location:
+            reason = _("No directory was selected")
+            valid = False
+        elif not osp.isdir(location):
+            reason = _("The directory doesn't exist")
+            valid = False
+        elif not is_writable(location):
+            reason = _("The directory is not writable")
+            valid = False
+        elif os.name == "nt" and any(
+            [re.search(r":", part) for part in pathlib.Path(location).parts[1:]]
+        ):
+            # Prevent creating a project in directory with colons.
+            # Fixes spyder-ide/spyder#16942
+            reason = _("The project directory can't contain ':'")
+            valid = False
+
+        return (valid, reason)
+
     # ---- Private API for the Switcher
     # -------------------------------------------------------------------------
     def _call_fzf(self, search_text=""):
@@ -1008,7 +1095,11 @@ class ProjectExplorerWidget(PluginMainWidget):
             The search text to pass to fzf.
         """
         project_path = self.get_active_project_path()
-        if self._fzf is None or project_path is None:
+        if (
+            not self.get_conf("search_files_in_switcher")
+            or self._fzf is None
+            or project_path is None
+        ):
             return
 
         self._worker_manager.terminate_all()
@@ -1033,17 +1124,25 @@ class ProjectExplorerWidget(PluginMainWidget):
         # List of results with absolute path
         if relative_path_list != ['']:
             project_path = self.get_active_project_path()
-            result_list = [
-                osp.normpath(os.path.join(project_path, path))
-                for path in relative_path_list
-            ]
+
+            # If Spyder is closed while a project is loaded at startup,
+            # project_path can become None. So, we need to check for that
+            # possibility.
+            # Fixes spyder-ide/spyder#25636
+            if project_path is not None:
+                result_list = [
+                    osp.normpath(os.path.join(project_path, path))
+                    for path in relative_path_list
+                ]
+            else:
+                result_list = []
         else:
             result_list = []
 
         # Filter files that can be opened in the editor
         result_list = [
             path for path in result_list
-            if osp.splitext(path)[1] in self._edit_extensions
+            if osp.splitext(path)[1] in EDIT_EXTENSIONS
         ]
 
         # Limit the number of results to not introduce lags when displaying
@@ -1106,6 +1205,18 @@ class ProjectExplorerWidget(PluginMainWidget):
         """Update default paths to be shown in the switcher."""
         self._default_switcher_paths = []
         self._call_fzf()
+
+    @on_conf_change(option="search_files_in_switcher")
+    def _on_search_files_in_switcher_changed(self, value):
+        """
+        Actions to take when users enable/disable searching files in the
+        switcher.
+        """
+        if value:
+            self._update_default_switcher_paths()
+        else:
+            self._clear_switcher_paths()
+
 
 # =============================================================================
 # Tests

@@ -14,33 +14,63 @@ NumPy Array Editor Dialog based on Qt
 # pylint: disable=R0201
 
 # Standard library imports
+from __future__ import annotations
 import io
+from typing import Callable, Optional, TYPE_CHECKING
 
 # Third party imports
 from qtpy.compat import from_qvariant, to_qvariant
 from qtpy.QtCore import (QAbstractTableModel, QItemSelection, QLocale,
                          QItemSelectionRange, QModelIndex, Qt, Slot)
 from qtpy.QtGui import QColor, QCursor, QDoubleValidator, QKeySequence
-from qtpy.QtWidgets import (QAbstractItemDelegate, QApplication, QCheckBox,
-                            QComboBox, QDialog, QGridLayout, QHBoxLayout,
-                            QInputDialog, QItemDelegate, QLabel, QLineEdit,
-                            QMenu, QMessageBox, QPushButton, QSpinBox,
-                            QStackedWidget, QTableView, QVBoxLayout,
-                            QWidget)
+from qtpy.QtWidgets import (
+    QAbstractItemDelegate, QApplication, QDialog, QHBoxLayout, QInputDialog,
+    QItemDelegate, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
+    QStackedWidget, QStyle, QTableView, QToolButton, QVBoxLayout, QWidget)
 from spyder_kernels.utils.nsview import value_to_display
 from spyder_kernels.utils.lazymodules import numpy as np
 
-# Local imports
-from spyder.api.config.fonts import SpyderFontsMixin, SpyderFontType
-from spyder.config.base import _
-from spyder.config.manager import CONF
-from spyder.py3compat import (is_binary_string, is_string, is_text_string,
-                              to_binary_string, to_text_string)
-from spyder.utils.icon_manager import ima
-from spyder.utils.qthelpers import add_actions, create_action, keybinding
-from spyder.plugins.variableexplorer.widgets.basedialog import BaseDialog
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
 
-# Note: string and unicode data types will be formatted with 's' (see below)
+# Local imports
+from spyder.api.fonts import SpyderFontsMixin, SpyderFontType
+from spyder.api.translations import _
+from spyder.api.widgets.comboboxes import SpyderComboBox
+from spyder.api.widgets.mixins import SpyderWidgetMixin
+from spyder.plugins.variableexplorer.widgets.basedialog import BaseDialog
+from spyder.plugins.variableexplorer.widgets.preferences import (
+    PreferencesDialog
+)
+from spyder.utils.icon_manager import ima
+from spyder.utils.qthelpers import keybinding, safe_disconnect
+from spyder.utils.stylesheet import AppStyle, MAC
+
+
+# =============================================================================
+# ---- Constants
+# =============================================================================
+
+class ArrayEditorActions:
+    Close = 'close'
+    Copy = 'copy_action'
+    Edit = 'edit_action'
+    Preferences = 'preferences_action'
+    Refresh = 'refresh_action'
+    Resize = 'resize_action'
+
+
+class ArrayEditorMenus:
+    Options = 'options_menu'
+
+
+class ArrayEditorWidgets:
+    OptionsToolButton = 'options_button_widget'
+    Toolbar = 'toolbar'
+    ToolbarStretcher = 'toolbar_stretcher'
+
+
+# Note: string and unicode data types will be formatted with '' (see below)
 SUPPORTED_FORMATS = {
     'single': '.6g',
     'double': '.6g',
@@ -89,10 +119,10 @@ LARGE_SIZE = 5e5
 LARGE_NROWS = 1e5
 LARGE_COLS = 60
 
+#==============================================================================
+# ---- Utility functions
+#==============================================================================
 
-#==============================================================================
-# Utility functions
-#==============================================================================
 def is_float(dtype):
     """Return True if datatype dtype is a float kind"""
     return ('float' in dtype.name) or dtype.name in ['single', 'double']
@@ -111,22 +141,29 @@ def get_idx_rect(index_list):
 
 
 #==============================================================================
-# Main classes
+# ---- Main classes
 #==============================================================================
+
 class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
-    """Array Editor Table Model"""
+    """
+    Array Editor Table Model
+
+    Attributes
+    ----------
+    bgcolor_enabled : bool
+        If True, vary backgrond color depending on cell value
+    _format_spec : str
+        Format specification for floats
+    """
 
     ROWS_TO_LOAD = 500
     COLS_TO_LOAD = 40
 
-    def __init__(self, data, format_spec=".6g", xlabels=None, ylabels=None,
-                 readonly=False, parent=None):
+    def __init__(self, data, format_spec=".6g", readonly=False, parent=None):
         QAbstractTableModel.__init__(self)
 
         self.dialog = parent
         self.changes = {}
-        self.xlabels = xlabels
-        self.ylabels = ylabels
         self.readonly = readonly
         self.test_array = np.array([0], dtype=data.dtype)
 
@@ -191,19 +228,23 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
             else:
                 self.cols_loaded = self.total_cols
 
-    def get_format_spec(self):
-        """Return current format"""
+    def get_format_spec(self) -> str:
+        """
+        Return current format specification for floats.
+        """
         # Avoid accessing the private attribute _format_spec from outside
         return self._format_spec
+
+    def set_format_spec(self, format_spec: str) -> None:
+        """
+        Set format specification for floats.
+        """
+        self._format_spec = format_spec
+        self.reset()
 
     def get_data(self):
         """Return data"""
         return self._data
-
-    def set_format_spec(self, format_spec):
-        """Change display format"""
-        self._format_spec = format_spec
-        self.reset()
 
     def columnCount(self, qindex=QModelIndex()):
         """Array column number"""
@@ -247,9 +288,11 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
             self.cols_loaded += items_to_fetch
             self.endInsertColumns()
 
-    def bgcolor(self, state):
-        """Toggle backgroundcolor"""
-        self.bgcolor_enabled = state > 0
+    def bgcolor(self, value: bool):
+        """
+        Set whether background color varies depending on cell value.
+        """
+        self.bgcolor_enabled = value
         self.reset()
 
     def get_value(self, index):
@@ -270,9 +313,9 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
 
         # Tranform binary string to unicode so they are displayed
         # correctly
-        if is_binary_string(value):
+        if isinstance(value, bytes):
             try:
-                value = to_text_string(value, 'utf8')
+                value = str(value, 'utf8')
             except Exception:
                 pass
 
@@ -323,9 +366,9 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
             except ValueError:
                 val = value.lower() == "true"
         elif dtype.startswith("string") or dtype.startswith("bytes"):
-            val = to_binary_string(value, 'utf8')
+            val = bytes(value, 'utf8')
         elif dtype.startswith("unicode") or dtype.startswith("str"):
-            val = to_text_string(value)
+            val = str(value)
         else:
             if value.lower().startswith('e') or value.lower().endswith('e'):
                 return False
@@ -350,7 +393,7 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
         self.changes[(i, j)] = self.test_array[0]
         self.dataChanged.emit(index, index)
 
-        if not is_string(val):
+        if not isinstance(val, (str, bytes)):
             val = self.color_func(val)
 
             if val > self.vmax:
@@ -364,19 +407,16 @@ class ArrayModel(QAbstractTableModel, SpyderFontsMixin):
     def flags(self, index):
         """Set editable flag"""
         if not index.isValid():
-            return Qt.ItemIsEnabled
-        return Qt.ItemFlags(int(QAbstractTableModel.flags(self, index) |
-                                Qt.ItemIsEditable))
+            return Qt.ItemFlag.ItemIsEnabled
+        return (
+            QAbstractTableModel.flags(self, index) | Qt.ItemFlag.ItemIsEditable
+        )
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         """Set header data"""
         if role != Qt.DisplayRole:
             return to_qvariant()
-        labels = self.xlabels if orientation == Qt.Horizontal else self.ylabels
-        if labels is None:
-            return to_qvariant(int(section))
-        else:
-            return to_qvariant(labels[section])
+        return to_qvariant(int(section))
 
     def reset(self):
         self.beginResetModel()
@@ -431,8 +471,11 @@ class ArrayDelegate(QItemDelegate, SpyderFontsMixin):
 
 
 #TODO: Implement "Paste" (from clipboard) feature
-class ArrayView(QTableView):
+class ArrayView(QTableView, SpyderWidgetMixin):
     """Array view class"""
+
+    CONF_SECTION = 'variable_explorer'
+
     def __init__(self, parent, model, dtype, shape):
         QTableView.__init__(self, parent)
 
@@ -444,13 +487,10 @@ class ArrayView(QTableView):
         self.viewport().resize(min(total_width, 1024), self.height())
         self.shape = shape
         self.menu = self.setup_menu()
-        CONF.config_shortcut(
-            self.copy,
-            context='variable_explorer',
-            name='copy',
-            parent=self)
+        self.register_shortcut_for_widget(name='copy', triggered=self.copy)
         self.horizontalScrollBar().valueChanged.connect(
-            self._load_more_columns)
+            self._load_more_columns
+        )
         self.verticalScrollBar().valueChanged.connect(self._load_more_rows)
 
     def _load_more_columns(self, value):
@@ -525,13 +565,28 @@ class ArrayView(QTableView):
 
     def setup_menu(self):
         """Setup context menu"""
-        self.copy_action = create_action(self, _('Copy'),
-                                         shortcut=keybinding('Copy'),
-                                         icon=ima.icon('editcopy'),
-                                         triggered=self.copy,
-                                         context=Qt.WidgetShortcut)
-        menu = QMenu(self)
-        add_actions(menu, [self.copy_action, ])
+        self.copy_action = self.create_action(
+            name=ArrayEditorActions.Copy,
+            text=_('Copy'),
+            icon=ima.icon('editcopy'),
+            triggered=self.copy,
+            register_action=False
+        )
+        self.copy_action.setShortcut(keybinding('Copy'))
+        self.copy_action.setShortcutContext(Qt.WidgetShortcut)
+
+        edit_action = self.create_action(
+            name=ArrayEditorActions.Edit,
+            text=_('Edit'),
+            icon=ima.icon('edit'),
+            triggered=self.edit_item,
+            register_action=False
+        )
+
+        menu = self.create_menu('Editor menu', register=False)
+        for action in [self.copy_action, edit_action]:
+            self.add_item_to_menu(action, menu)
+
         return menu
 
     def contextMenuEvent(self, event):
@@ -581,11 +636,16 @@ class ArrayView(QTableView):
         clipboard = QApplication.clipboard()
         clipboard.setText(cliptxt)
 
+    def edit_item(self):
+        """Edit item"""
+        index = self.currentIndex()
+        if index.isValid():
+            self.edit(index)
+
 
 class ArrayEditorWidget(QWidget):
 
-    def __init__(self, parent, data, readonly=False,
-                 xlabels=None, ylabels=None):
+    def __init__(self, parent, data, readonly=False):
         QWidget.__init__(self, parent)
         self.data = data
         self.old_data_shape = None
@@ -596,13 +656,17 @@ class ArrayEditorWidget(QWidget):
             self.old_data_shape = self.data.shape
             self.data.shape = (1, 1)
 
-        format_spec = SUPPORTED_FORMATS.get(data.dtype.name, 's')
-        self.model = ArrayModel(self.data, format_spec=format_spec, xlabels=xlabels,
-                                ylabels=ylabels, readonly=readonly, parent=self)
+        # Use '' as default format specifier, because 's' does not produce
+        # a `str` for arrays with strings, see spyder-ide/spyder#22466
+        format_spec = SUPPORTED_FORMATS.get(data.dtype.name, '')
+
+        self.model = ArrayModel(self.data, format_spec=format_spec,
+                                readonly=readonly, parent=self)
         self.view = ArrayView(self, self.model, data.dtype, data.shape)
 
         layout = QVBoxLayout()
         layout.addWidget(self.view)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
     def accept_changes(self):
@@ -634,9 +698,29 @@ class ArrayEditorWidget(QWidget):
             self.model.set_format_spec(format_spec)
 
 
-class ArrayEditor(BaseDialog):
+class ArrayEditor(BaseDialog, SpyderWidgetMixin):
     """Array Editor Dialog"""
-    def __init__(self, parent=None):
+
+    CONF_SECTION = 'variable_explorer'
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        data_function: Optional[Callable[[], ArrayLike]] = None
+    ):
+        """
+        Constructor.
+
+        Parameters
+        ----------
+        parent : Optional[QWidget]
+            The parent widget. The default is None.
+        data_function : Optional[Callable[[], ArrayLike]]
+            A function which returns the current value of the array. This is
+            used for refreshing the editor. If set to None, the editor cannot
+            be refreshed. The default is None.
+        """
+
         super().__init__(parent)
 
         # Destroying the C++ object right after closing the dialog box,
@@ -645,25 +729,209 @@ class ArrayEditor(BaseDialog):
         # a segmentation fault on UNIX or an application crash on Windows
         self.setAttribute(Qt.WA_DeleteOnClose)
 
+        self.data_function = data_function
         self.data = None
         self.arraywidget = None
         self.stack = None
-        self.layout = None
         self.btn_save_and_close = None
         self.btn_close = None
         # Values for 3d array editor
         self.dim_indexes = [{}, {}, {}]
         self.last_dim = 0  # Adjust this for changing the startup dimension
 
-    def setup_and_check(self, data, title='', readonly=False,
-                        xlabels=None, ylabels=None):
+    def setup_and_check(self, data, title='', readonly=False):
+        """
+        Setup the editor.
+
+        It returns False if data is not supported, True otherwise.
+        """
+        self.setup_ui(title, readonly)
+        return self.set_data_and_check(data, readonly)
+
+    def setup_ui(self, title='', readonly=False):
+        """
+        Create the user interface.
+
+        This creates the necessary widgets and layouts that make up the user
+        interface of the array editor. Some elements need to be hidden
+        depending on the data; this will be done when the data is set.
+        """
+
+        # ---- Actions
+
+        def do_nothing():
+            # .create_action() needs a toggled= parameter, but we can only
+            # set it later in the set_data_and_check method, so we use this
+            # function as a placeholder here.
+            pass
+
+        self.preferences_action = self.create_action(
+            name=ArrayEditorActions.Preferences,
+            icon=self.create_icon('configure'),
+            text=_('Display options ...'),
+            triggered=self.show_preferences_dialog,
+            register_action=False
+        )
+        self.close_action = self.create_action(
+            name=ArrayEditorActions.Close,
+            icon=self.create_icon('close_pane'),
+            text=_('Close'),
+            triggered=self.reject,
+            shortcut=self.get_shortcut(ArrayEditorActions.Close),
+            register_action=False,
+            register_shortcut=True
+        )
+        self.register_shortcut_for_widget(name='close', triggered=self.reject)
+
+        self.refresh_action = self.create_action(
+            ArrayEditorActions.Refresh,
+            text=_('Refresh'),
+            icon=self.create_icon('refresh'),
+            tip=_('Refresh editor with current value of variable in console'),
+            triggered=self.refresh,
+            register_action=False
+        )
+        self.refresh_action.setDisabled(self.data_function is None)
+        self.resize_action = self.create_action(
+            ArrayEditorActions.Resize,
+            text=_('Resize'),
+            icon=self.create_icon('collapse_column'),
+            tip=_('Resize columns to contents'),
+            triggered=do_nothing,
+            register_action=False
+        )
+
+        # ---- Toolbar and options menu
+
+        options_menu = self.create_menu(
+            ArrayEditorMenus.Options,
+            register=False
+        )
+        for item in [self.preferences_action, self.close_action]:
+            self.add_item_to_menu(item, options_menu)
+
+        options_button = self.create_toolbutton(
+            name=ArrayEditorWidgets.OptionsToolButton,
+            text=_('Options'),
+            icon=ima.icon('tooloptions'),
+            register=False
+        )
+        options_button.setPopupMode(QToolButton.InstantPopup)
+        options_button.setMenu(options_menu)
+
+        toolbar = self.create_toolbar(
+            ArrayEditorWidgets.Toolbar,
+            register=False
+        )
+        stretcher = self.create_stretcher(ArrayEditorWidgets.ToolbarStretcher)
+        for item in [stretcher, self.resize_action, self.refresh_action,
+                     options_button]:
+            self.add_item_to_toolbar(item, toolbar)
+
+        toolbar.render()
+
+        # ---- Stack widget (empty)
+
+        self.stack = QStackedWidget(self)
+        self.stack.currentChanged.connect(self.current_widget_changed)
+
+        # ---- Widgets in bottom left for special arrays
+        #
+        # These are normally hidden. When editing masked, record or 3d arrays,
+        # the relevant elements are made visible in the set_data_and_check
+        # method.
+
+        self.btn_layout = QHBoxLayout()
+
+        self.combo_label = QLabel()
+        self.btn_layout.addWidget(self.combo_label)
+
+        self.combo_box = SpyderComboBox(self)
+        self.combo_box.currentIndexChanged.connect(self.combo_box_changed)
+        self.btn_layout.addWidget(self.combo_box)
+
+        self.shape_label = QLabel()
+        self.btn_layout.addWidget(self.shape_label)
+
+        self.index_label = QLabel(_('Index:'))
+        self.btn_layout.addWidget(self.index_label)
+
+        self.index_spin = QSpinBox(self, keyboardTracking=False)
+        self.index_spin.valueChanged.connect(self.change_active_widget)
+        self.btn_layout.addWidget(self.index_spin)
+
+        self.slicing_label = QLabel()
+        self.btn_layout.addWidget(self.slicing_label)
+
+        self.masked_label = QLabel(
+            _('<u>Warning</u>: Changes are applied separately')
+        )
+        self.masked_label.setToolTip(
+            _("For performance reasons, changes applied to masked arrays "
+              "won't be reflected in array's data (and vice-versa).")
+        )
+        self.btn_layout.addWidget(self.masked_label)
+
+        self.btn_layout.addStretch()
+
+        # ---- Push buttons on the bottom right
+
+        self.btn_save_and_close = QPushButton(_('Save and Close'))
+        self.btn_save_and_close.setDisabled(True)
+        self.btn_save_and_close.clicked.connect(self.accept)
+        self.btn_layout.addWidget(self.btn_save_and_close)
+
+        self.btn_close = QPushButton(_('Close'))
+        self.btn_close.setAutoDefault(True)
+        self.btn_close.setDefault(True)
+        self.btn_close.clicked.connect(self.reject)
+        self.btn_layout.addWidget(self.btn_close)
+
+        # ---- Final layout
+
+        layout = QVBoxLayout()
+        layout.addWidget(toolbar)
+
+        # Remove vertical space between toolbar and table containing array
+        style = self.style()
+        default_spacing = style.pixelMetric(QStyle.PM_LayoutVerticalSpacing)
+        layout.addSpacing(-default_spacing)
+
+        layout.addWidget(self.stack)
+        layout.addSpacing((-1 if MAC else 2) * AppStyle.MarginSize)
+        layout.addLayout(self.btn_layout)
+        self.setLayout(layout)
+
+        # Set title
+        if title:
+            title = str(title) + " - " + _("NumPy object array")
+        else:
+            title = _("Array editor")
+        if readonly:
+            title += ' (' + _('read only') + ')'
+        self.setWindowTitle(title)
+
+        # Set minimum size
+        self.setMinimumSize(500, 300)
+
+        # Make the dialog act as a window
+        self.setWindowFlags(Qt.Window)
+
+    def set_data_and_check(self, data, readonly=False):
         """
         Setup ArrayEditor:
         return False if data is not supported, True otherwise
         """
+        if not isinstance(data, (np.ndarray, np.ma.MaskedArray)):
+            return False
+
         self.data = data
         readonly = readonly or not self.data.flags.writeable
         is_masked_array = isinstance(data, np.ma.MaskedArray)
+
+        # Reset data for 3d arrays
+        self.dim_indexes = [{}, {}, {}]
+        self.last_dim = 0
 
         # This is necessary in case users subclass ndarray and set the dtype
         # to an object that is not an actual dtype.
@@ -676,14 +944,6 @@ class ArrayEditor(BaseDialog):
         if data.ndim > 3:
             self.error(_("Arrays with more than 3 dimensions are not "
                          "supported"))
-            return False
-        if xlabels is not None and len(xlabels) != self.data.shape[1]:
-            self.error(_("The 'xlabels' argument length do no match array "
-                         "column number"))
-            return False
-        if ylabels is not None and len(ylabels) != self.data.shape[0]:
-            self.error(_("The 'ylabels' argument length do no match array row "
-                         "number"))
             return False
         if not is_record_array:
             # This is necessary in case users subclass ndarray and set the
@@ -709,170 +969,117 @@ class ArrayEditor(BaseDialog):
                 self.error(_("%s are currently not supported") % arr)
                 return False
 
-        self.layout = QGridLayout()
-        self.setLayout(self.layout)
-        if title:
-            title = to_text_string(title) + " - " + _("NumPy object array")
-        else:
-            title = _("Array editor")
-        if readonly:
-            title += ' (' + _('read only') + ')'
-        self.setWindowTitle(title)
-
         # ---- Stack widget
-        self.stack = QStackedWidget(self)
+
+        # Remove old widgets, if any
+        while self.stack.count() > 0:
+            # Note: widgets get renumbered after removeWidget()
+            widget = self.stack.widget(0)
+            self.stack.removeWidget(widget)
+            widget.deleteLater()
+
+        # Add widgets to the stack
         if is_record_array:
             for name in data.dtype.names:
                 self.stack.addWidget(ArrayEditorWidget(self, data[name],
-                                                       readonly, xlabels,
-                                                       ylabels))
+                                                       readonly))
         elif is_masked_array:
-            self.stack.addWidget(ArrayEditorWidget(self, data, readonly,
-                                                   xlabels, ylabels))
-            self.stack.addWidget(ArrayEditorWidget(self, data.data, readonly,
-                                                   xlabels, ylabels))
-            self.stack.addWidget(ArrayEditorWidget(self, data.mask, readonly,
-                                                   xlabels, ylabels))
+            self.stack.addWidget(ArrayEditorWidget(self, data, readonly))
+            self.stack.addWidget(ArrayEditorWidget(self, data.data, readonly))
+            self.stack.addWidget(ArrayEditorWidget(self, data.mask, readonly))
         elif data.ndim == 3:
-            # We create here the necessary widgets for current_dim_changed to
-            # work. The rest are created below.
-            # QSpinBox
-            self.index_spin = QSpinBox(self, keyboardTracking=False)
-            self.index_spin.valueChanged.connect(self.change_active_widget)
-
-            # Labels
-            self.shape_label = QLabel()
-            self.slicing_label = QLabel()
-
             # Set the widget to display when launched
-            self.current_dim_changed(self.last_dim)
+            self.combo_box_changed(self.last_dim)
         else:
-            self.stack.addWidget(ArrayEditorWidget(self, data, readonly,
-                                                   xlabels, ylabels))
+            self.stack.addWidget(ArrayEditorWidget(self, data, readonly))
 
         self.arraywidget = self.stack.currentWidget()
         self.arraywidget.model.dataChanged.connect(self.save_and_close_enable)
-        self.stack.currentChanged.connect(self.current_widget_changed)
-        self.layout.addWidget(self.stack, 1, 0)
 
-        # ---- Top row of buttons
-        btn_layout_top = None
-        if is_record_array or is_masked_array or data.ndim == 3:
-            btn_layout_top = QHBoxLayout()
+        # ---- Actions
 
-            if is_record_array:
-                btn_layout_top.addWidget(QLabel(_("Record array fields:")))
-                names = []
-                for name in data.dtype.names:
-                    field = data.dtype.fields[name]
-                    text = name
-                    if len(field) >= 3:
-                        title = field[2]
-                        if not is_text_string(title):
-                            title = repr(title)
-                        text += ' - '+title
-                    names.append(text)
-            else:
-                names = [_('Masked data'), _('Data'), _('Mask')]
+        safe_disconnect(self.resize_action.triggered)
+        self.resize_action.triggered.connect(
+            self.arraywidget.view.resize_to_contents)
 
-            if data.ndim == 3:
-                # QComboBox
-                names = [str(i) for i in range(3)]
-                ra_combo = QComboBox(self)
-                ra_combo.addItems(names)
-                ra_combo.currentIndexChanged.connect(self.current_dim_changed)
+        # ---- Widgets in bottom left
 
-                # Adding the widgets to layout
-                label = QLabel(_("Axis:"))
-                btn_layout_top.addWidget(label)
-                btn_layout_top.addWidget(ra_combo)
-                btn_layout_top.addWidget(self.shape_label)
+        # By default, all these widgets are hidden
+        self.combo_label.hide()
+        self.combo_box.hide()
+        self.shape_label.hide()
+        self.index_label.hide()
+        self.index_spin.hide()
+        self.slicing_label.hide()
+        self.masked_label.hide()
 
-                label = QLabel(_("Index:"))
-                btn_layout_top.addWidget(label)
-                btn_layout_top.addWidget(self.index_spin)
+        # Empty combo box
+        while self.combo_box.count() > 0:
+            self.combo_box.removeItem(0)
 
-                btn_layout_top.addWidget(self.slicing_label)
-            else:
-                ra_combo = QComboBox(self)
-                ra_combo.currentIndexChanged.connect(self.stack.setCurrentIndex)
-                ra_combo.addItems(names)
-                btn_layout_top.addWidget(ra_combo)
+        # Handle cases
+        if is_record_array:
 
-            if is_masked_array:
-                label = QLabel(
-                    _("<u>Warning</u>: Changes are applied separately")
-                )
-                label.setToolTip(_("For performance reasons, changes applied "
-                                   "to masked arrays won't be reflected in "
-                                   "array's data (and vice-versa)."))
-                btn_layout_top.addWidget(label)
+            self.combo_label.setText(_('Record array fields:'))
+            self.combo_label.show()
 
-            btn_layout_top.addStretch()
+            names = []
+            for name in data.dtype.names:
+                field = data.dtype.fields[name]
+                text = name
+                if len(field) >= 3:
+                    title = field[2]
+                    if not isinstance(title, str):
+                        title = repr(title)
+                    text += ' - '+title
+                names.append(text)
+            self.combo_box.addItems(names)
+            self.combo_box.show()
+
+        elif is_masked_array:
+
+            names = [_('Masked data'), _('Data'), _('Mask')]
+            self.combo_box.addItems(names)
+            self.combo_box.show()
+
+            self.masked_label.show()
+
+        elif data.ndim == 3:
+
+            self.combo_label.setText(_('Axis:'))
+            self.combo_label.show()
+
+            names = [str(i) for i in range(3)]
+            self.combo_box.addItems(names)
+            self.combo_box.show()
+
+            self.shape_label.show()
+            self.index_label.show()
+            self.index_spin.show()
+            self.slicing_label.show()
 
         # ---- Bottom row of buttons
-        btn_layout_bottom = QHBoxLayout()
 
-        btn_format = QPushButton(_("Format"))
-        # disable format button for int type
-        btn_format.setEnabled(is_float(self.arraywidget.data.dtype))
-        btn_layout_bottom.addWidget(btn_format)
-        btn_format.clicked.connect(self.arraywidget.change_format)
-
-        btn_resize = QPushButton(_("Resize"))
-        btn_layout_bottom.addWidget(btn_resize)
-        btn_resize.clicked.connect(self.arraywidget.view.resize_to_contents)
-
-        self.bgcolor = QCheckBox(_('Background color'))
-        self.bgcolor.setEnabled(self.arraywidget.model.bgcolor_enabled)
-        self.bgcolor.setChecked(self.arraywidget.model.bgcolor_enabled)
-        self.bgcolor.stateChanged.connect(
-            lambda state: self.arraywidget.model.bgcolor(state))
-        btn_layout_bottom.addWidget(self.bgcolor)
-
-        btn_layout_bottom.addStretch()
-
-        if not readonly:
-            self.btn_save_and_close = QPushButton(_('Save and Close'))
-            self.btn_save_and_close.setDisabled(True)
-            self.btn_save_and_close.clicked.connect(self.accept)
-            btn_layout_bottom.addWidget(self.btn_save_and_close)
-
-        self.btn_close = QPushButton(_('Close'))
-        self.btn_close.setAutoDefault(True)
-        self.btn_close.setDefault(True)
-        self.btn_close.clicked.connect(self.reject)
-        btn_layout_bottom.addWidget(self.btn_close)
-
-        # ---- Final layout
-        btn_layout_bottom.setContentsMargins(4, 4, 4, 4)
-        if btn_layout_top is not None:
-            btn_layout_top.setContentsMargins(4, 4, 4, 4)
-            self.layout.addLayout(btn_layout_top, 2, 0)
-            self.layout.addLayout(btn_layout_bottom, 3, 0)
-        else:
-            self.layout.addLayout(btn_layout_bottom, 2, 0)
-
-        # Set minimum size
-        self.setMinimumSize(500, 300)
-
-        # Make the dialog act as a window
-        self.setWindowFlags(Qt.Window)
+        self.btn_save_and_close.setDisabled(True)
+        if readonly:
+            self.btn_save_and_close.hide()
 
         return True
 
     @Slot(QModelIndex, QModelIndex)
     def save_and_close_enable(self, left_top, bottom_right):
         """Handle the data change event to enable the save and close button."""
-        if self.btn_save_and_close:
+        if self.btn_save_and_close.isVisible():
             self.btn_save_and_close.setEnabled(True)
             self.btn_save_and_close.setAutoDefault(True)
             self.btn_save_and_close.setDefault(True)
 
     def current_widget_changed(self, index):
         self.arraywidget = self.stack.widget(index)
-        self.arraywidget.model.dataChanged.connect(self.save_and_close_enable)
-        self.bgcolor.setChecked(self.arraywidget.model.bgcolor_enabled)
+        if self.arraywidget:
+            self.arraywidget.model.dataChanged.connect(
+                self.save_and_close_enable
+            )
 
     def change_active_widget(self, index):
         """
@@ -902,11 +1109,18 @@ class ArrayEditor(BaseDialog):
             self.stack.update()
         self.stack.setCurrentIndex(stack_index)
 
-    def current_dim_changed(self, index):
+    def combo_box_changed(self, index):
         """
-        This change the active axis the array editor is plotting over
-        in 3D
+        Handle changes in the combo box
+
+        For masked and record arrays, this changes the visible widget in the
+        stack. For 3d arrays, this changes the active axis the array editor is
+        plotting over.
         """
+        if self.data.ndim != 3:
+            self.stack.setCurrentIndex(index)
+            return
+
         self.last_dim = index
         string_size = ['%i']*3
         string_size[index] = '<font color=red>%i</font>'
@@ -920,6 +1134,76 @@ class ArrayEditor(BaseDialog):
             self.change_active_widget(0)
         self.index_spin.setRange(-self.data.shape[index],
                                  self.data.shape[index]-1)
+
+    def show_preferences_dialog(self) -> None:
+        """
+        Show dialog for setting view options and process user choices.
+        """
+        # Create dialog using current options
+        dialog = PreferencesDialog('array', parent=self)
+        dialog.float_format = self.arraywidget.model.get_format_spec()
+        dialog.varying_background = self.arraywidget.model.bgcolor_enabled
+
+        # Show dialog and allow user to interact
+        result = dialog.exec_()
+
+        # If user clicked 'OK' then set new options accordingly
+        if result == QDialog.Accepted:
+            float_format = dialog.float_format
+
+            # This is necessary to handle formatting for integers.
+            # Fixes spyder-ide/spyder#22629
+            if float_format == 'd':
+                float_format = '.0f'
+
+            try:
+                format(1.1, float_format)
+            except:
+                msg = _("Format ({}) is incorrect").format(float_format)
+                QMessageBox.critical(self, _("Error"), msg)
+            else:
+                self.arraywidget.model.set_format_spec(float_format)
+                self.set_conf('dataframe_format', float_format)
+
+            self.arraywidget.model.bgcolor(dialog.varying_background)
+
+    def refresh(self) -> None:
+        """
+        Refresh data in editor.
+        """
+        assert self.data_function is not None
+
+        if self.btn_save_and_close.isEnabled():
+            if not self.ask_for_refresh_confirmation():
+                return
+
+        try:
+            data = self.data_function()
+        except (IndexError, KeyError):
+            self.error(_('The variable no longer exists.'))
+            return
+
+        if not self.set_data_and_check(data):
+            self.error(
+                _('The new value cannot be displayed in the array editor.')
+            )
+
+    def ask_for_refresh_confirmation(self) -> bool:
+        """
+        Ask user to confirm refreshing the editor.
+
+        This function is to be called if refreshing the editor would overwrite
+        changes that the user made previously. The function returns True if
+        the user confirms that they want to refresh and False otherwise.
+        """
+        message = _('Refreshing the editor will overwrite the changes that '
+                    'you made. Do you want to proceed?')
+        result = QMessageBox.question(
+            self,
+            _('Refresh array editor?'),
+            message
+        )
+        return result == QMessageBox.Yes
 
     @Slot()
     def accept(self):

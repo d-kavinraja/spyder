@@ -9,7 +9,6 @@ import uuid
 import re
 
 from qtpy import QtCore, QtGui, QtWidgets
-from ipython_genutils.importstring import import_item
 
 from qtconsole.base_frontend_mixin import BaseFrontendMixin
 from traitlets import Any, Bool, Instance, Unicode, DottedObjectName, default
@@ -17,6 +16,7 @@ from .bracket_matcher import BracketMatcher
 from .call_tip_widget import CallTipWidget
 from .history_console_widget import HistoryConsoleWidget
 from .pygments_highlighter import PygmentsHighlighter
+from .util import import_item
 
 
 class FrontendHighlighter(PygmentsHighlighter):
@@ -189,9 +189,8 @@ class FrontendWidget(HistoryConsoleWidget, BaseFrontendMixin):
 
         # Configure actions.
         action = self._copy_raw_action
-        key = QtCore.Qt.CTRL | QtCore.Qt.SHIFT | QtCore.Qt.Key_C
         action.setEnabled(False)
-        action.setShortcut(QtGui.QKeySequence(key))
+        action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+C"))
         action.setShortcutContext(QtCore.Qt.WidgetWithChildrenShortcut)
         action.triggered.connect(self.copy_raw)
         self.copy_available.connect(action.setEnabled)
@@ -546,7 +545,7 @@ class FrontendWidget(HistoryConsoleWidget, BaseFrontendMixin):
         if self.kernel_manager:
             self.kernel_manager.reset_autorestart_count()
 
-        self.reset()
+        self.reset(clear=not died)
 
     def _handle_inspect_reply(self, rep):
         """Handle replies for call tips."""
@@ -616,6 +615,9 @@ class FrontendWidget(HistoryConsoleWidget, BaseFrontendMixin):
             # kernel started while we were running
             if self._executing:
                 self._handle_kernel_restarted(died=True)
+        elif state == 'restarting':
+            # handle kernel unexpected restarts
+            self._handle_kernel_restarted(died=True)
         elif state == 'idle':
             pass
         elif state == 'busy':
@@ -729,7 +731,7 @@ class FrontendWidget(HistoryConsoleWidget, BaseFrontendMixin):
 
     def append_stream(self, text):
         """Appends text to the output stream."""
-        self._append_plain_text(text, before_prompt=True)
+        self._append_plain_text(text, before_prompt = True)
 
     def flush_clearoutput(self):
         """If a clearoutput is pending, execute it."""

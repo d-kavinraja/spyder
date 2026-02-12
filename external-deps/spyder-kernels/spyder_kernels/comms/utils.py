@@ -53,7 +53,16 @@ class WriteWrapper(object):
             # Fixes spyder-ide/spyder-kernels#343
             'DeprecationWarning',
             # Fixes spyder-ide/spyder-kernels#365
-            'IOStream.flush timed out'
+            'IOStream.flush timed out',
+            # Avoid unnecessary messages from set_configuration when changing
+            # Matplotlib options.
+            "Warning: Cannot change to a different GUI toolkit",
+            "%pylab is deprecated",
+            "Populating the interactive namespace",
+            "\n",
+            # Fixes spyder-ide/spyder#21652
+            "WARNING",
+            "Active device does not have an attribute",
         ]
 
         return any([msg in message for msg in benign_messages])
@@ -67,11 +76,8 @@ class WriteWrapper(object):
             if not self._warning_shown:
                 self._warning_shown = True
 
-                # Don't print handler name for `show_mpl_backend_errors`
-                # because we have a specific message for it.
                 # request_pdb_stop is expected to print messages.
-                if self._name not in [
-                        'show_mpl_backend_errors', 'request_pdb_stop']:
+                if self._name not in ['request_pdb_stop']:
                     self._write(
                         "\nOutput from spyder call " + repr(self._name) + ":\n"
                     )

@@ -28,12 +28,11 @@ from chardet.universaldetector import UniversalDetector
 from atomicwrites import atomic_write
 
 # Local imports
-from spyder.py3compat import (is_string, to_text_string, is_binary_string,
-                              is_text_string)
 from spyder.utils.external.binaryornot.check import is_binary
 
 
 PREFERRED_ENCODING = locale.getpreferredencoding()
+
 
 def transcode(text, input=PREFERRED_ENCODING, output=PREFERRED_ENCODING):
     """Transcode a text string"""
@@ -45,10 +44,11 @@ def transcode(text, input=PREFERRED_ENCODING, output=PREFERRED_ENCODING):
         except UnicodeError:
             return text
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 #  Functions for encoding and decoding bytes that come from
 #  the *file system*.
-#------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 # The default encoding for file paths and environment variables should be set
 # to match the default encoding that the OS is using.
@@ -63,16 +63,18 @@ def getfilesystemencoding():
         encoding = PREFERRED_ENCODING
     return encoding
 
+
 FS_ENCODING = getfilesystemencoding()
+
 
 def to_unicode_from_fs(string):
     """
     Return a unicode version of string decoded using the file system encoding.
     """
-    if not is_string(string): # string is a QString
-        string = to_text_string(string.toUtf8(), 'utf-8')
+    if not isinstance(string, (str, bytes)):  # string is a QString
+        string = str(string.toUtf8())
     else:
-        if is_binary_string(string):
+        if isinstance(string, bytes):
             try:
                 unic = string.decode(FS_ENCODING)
             except (UnicodeError, TypeError):
@@ -81,12 +83,13 @@ def to_unicode_from_fs(string):
                 return unic
     return string
 
+
 def to_fs_from_unicode(unic):
     """
     Return a byte string version of unic encoded using the file
     system encoding.
     """
-    if is_text_string(unic):
+    if isinstance(unic, str):
         try:
             string = unic.encode(FS_ENCODING)
         except (UnicodeError, TypeError):
@@ -95,30 +98,41 @@ def to_fs_from_unicode(unic):
             return string
     return unic
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 #  Functions for encoding and decoding *text data* itself, usually originating
 #  from or destined for the *contents* of a file.
-#------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 # Codecs for working with files and text.
 CODING_RE = re.compile(r"coding[:=]\s*([-\w_.]+)")
-CODECS = ['utf-8', 'iso8859-1',  'iso8859-15', 'ascii', 'koi8-r', 'cp1251',
-          'koi8-u', 'iso8859-2', 'iso8859-3', 'iso8859-4', 'iso8859-5',
-          'iso8859-6', 'iso8859-7', 'iso8859-8', 'iso8859-9',
-          'iso8859-10', 'iso8859-13', 'iso8859-14', 'latin-1',
-          'utf-16']
+CODECS = [
+    'utf-8', 'iso8859-1',  'iso8859-15', 'ascii', 'koi8-r', 'cp1251',
+    'koi8-u', 'iso8859-2', 'iso8859-3', 'iso8859-4', 'iso8859-5',
+    'iso8859-6', 'iso8859-7', 'iso8859-8', 'iso8859-9',
+    'iso8859-10', 'iso8859-13', 'iso8859-14', 'latin-1', 'utf-16'
+]
 
 
-def get_coding(text, force_chardet=False):
+def get_coding(text, force_chardet=False, default_codec=None):
     """
     Function to get the coding of a text.
+
+    By default, first look for declarations of the form "coding=xxx" in the
+    first two lines of text. If none is found, then use the chardet library to
+    guess. If that also fails, then return None.
+
+    If force_chardet is set, then do not look for "coding=xxx" and only use
+    the chardet library. If default_codec is set, then do not use the chardet
+    library and return default_codec if there is no "coding=xxx" declaration.
+
     @param text text to inspect (string)
     @return coding string
     """
     if not force_chardet:
         for line in text.splitlines()[:2]:
             try:
-                result = CODING_RE.search(to_text_string(line))
+                result = CODING_RE.search(str(line))
             except UnicodeDecodeError:
                 # This could fail because to_text_string assume the text
                 # is utf8-like and we don't know the encoding to give
@@ -133,18 +147,20 @@ def get_coding(text, force_chardet=False):
                         return codec
 
     # Fallback using chardet
-    if is_binary_string(text):
+    if isinstance(text, bytes) and (force_chardet or default_codec is None):
         detector = UniversalDetector()
         for line in text.splitlines()[:2]:
             detector.feed(line)
-            if detector.done: break
+            if detector.done:
+                break
 
         detector.close()
         return detector.result['encoding']
 
-    return None
+    return default_codec
 
-def decode(text):
+
+def decode(text, default_codec=None):
     """
     Function to decode a text.
     @param text text to decode (string)
@@ -153,25 +169,29 @@ def decode(text):
     try:
         if text.startswith(BOM_UTF8):
             # UTF-8 with BOM
-            return to_text_string(text[len(BOM_UTF8):], 'utf-8'), 'utf-8-bom'
+            return str(text[len(BOM_UTF8) :], "utf-8"), "utf-8-bom"
         elif text.startswith(BOM_UTF16):
             # UTF-16 with BOM
-            return to_text_string(text[len(BOM_UTF16):], 'utf-16'), 'utf-16'
+            return str(text[len(BOM_UTF16) :], "utf-16"), "utf-16"
         elif text.startswith(BOM_UTF32):
             # UTF-32 with BOM
-            return to_text_string(text[len(BOM_UTF32):], 'utf-32'), 'utf-32'
-        coding = get_coding(text)
+            return str(text[len(BOM_UTF32) :], "utf-32"), "utf-32"
+
+        coding = get_coding(text, default_codec=default_codec)
         if coding:
-            return to_text_string(text, coding), coding
+            return str(text, coding), coding
     except (UnicodeError, LookupError):
         pass
+
     # Assume UTF-8
     try:
-        return to_text_string(text, 'utf-8'), 'utf-8-guessed'
+        return str(text, "utf-8"), "utf-8-guessed"
     except (UnicodeError, LookupError):
         pass
+
     # Assume Latin-1 (behaviour before 3.7.1)
-    return to_text_string(text, "latin-1"), 'latin-1-guessed'
+    return str(text, "latin-1"), 'latin-1-guessed'
+
 
 def encode(text, orig_coding):
     """
@@ -197,8 +217,8 @@ def encode(text, orig_coding):
             return text.encode(coding), coding
         except (UnicodeError, LookupError):
             raise RuntimeError("Incorrect encoding (%s)" % coding)
-    if orig_coding and orig_coding.endswith('-default') or \
-      orig_coding.endswith('-guessed'):
+    if (orig_coding and orig_coding.endswith('-default')
+            or orig_coding.endswith('-guessed')):
         coding = orig_coding.replace("-default", "")
         coding = orig_coding.replace("-guessed", "")
         try:
@@ -209,12 +229,13 @@ def encode(text, orig_coding):
     # Save as UTF-8 without BOM
     return text.encode('utf-8'), 'utf-8'
 
+
 def to_unicode(string):
     """Convert a string to unicode"""
-    if not is_text_string(string):
+    if not isinstance(string, str):
         for codec in CODECS:
             try:
-                unic = to_text_string(string, codec)
+                unic = str(string, codec)
             except UnicodeError:
                 pass
             except TypeError:
@@ -235,7 +256,7 @@ def write(text, filename, encoding='utf-8', mode='wb'):
         try:
             absolute_path_filename = pathlib.Path(filename).resolve()
             if absolute_path_filename.exists():
-                absolute_filename = to_text_string(absolute_path_filename)
+                absolute_filename = str(absolute_path_filename)
             else:
                 absolute_filename = osp.realpath(filename)
         except (OSError, RuntimeError):
@@ -296,13 +317,20 @@ def writelines(lines, filename, encoding='utf-8', mode='wb'):
     """
     return write(os.linesep.join(lines), filename, encoding, mode)
 
+
 def read(filename, encoding='utf-8'):
     """
     Read text from file ('filename')
     Return text and encoding
     """
-    text, encoding = decode( open(filename, 'rb').read() )
+    if filename.endswith(('.py', '.pyw', '.ipy', '.pyi')):
+        default_codec = 'utf-8'  # Per PEP3120
+    else:
+        default_codec = None
+    contents = open(filename, 'rb').read()
+    text, encoding = decode(contents, default_codec=default_codec)
     return text, encoding
+
 
 def readlines(filename, encoding='utf-8'):
     """

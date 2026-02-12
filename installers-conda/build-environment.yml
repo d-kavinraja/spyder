@@ -1,13 +1,9 @@
 name: spy-inst
 channels:
-  - napari/label/bundle_tools_3
   - conda-forge
 dependencies:
-  - boa
-  - conda
-  - conda-standalone
-  - constructor
+  - conda-build =25.7.0
+  - conda-lock =3.0.4
+  - constructor =3.12.2
   - gitpython
-  - menuinst
-  - ruamel.yaml.jinja2
   - setuptools_scm

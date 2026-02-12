@@ -29,9 +29,11 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 """
 
-version_info = (6, 0, 0, "dev0")
+from packaging.version import parse
 
-__version__ = '.'.join(map(str, version_info))
+version_info = (6, 2, 0, "a1", "dev0")
+
+__version__ = str(parse('.'.join(map(str, version_info))))
 __installer_version__ = __version__
 __title__ = 'Spyder'
 __author__ = 'Spyder Project Contributors and others'
@@ -60,8 +62,8 @@ def get_versions(reporev=True):
 
     import qtpy
     import qtpy.QtCore
+    from spyder_kernels.utils.pythonenv import is_conda_env
 
-    from spyder.utils.conda import is_conda_env
     from spyder.config.base import is_conda_based_app
 
     revision = branch = None
@@ -85,8 +87,11 @@ def get_versions(reporev=True):
         'bitness': 64 if sys.maxsize > 2**32 else 32,
         'qt': qtpy.QtCore.__version__,
         'qt_api': qtpy.API_NAME,      # PyQt5
-        'qt_api_ver': (qtpy.PYSIDE_VERSION if qtpy.API == "pyside2"
-                       else qtpy.PYQT_VERSION),
+        'qt_api_ver': (
+            qtpy.PYSIDE_VERSION
+            if qtpy.API.startswith("pyside")
+            else qtpy.PYQT_VERSION
+        ),
         'system': platform.system(),   # Linux, Windows, ...
         'release': platform.release(),  # XP, 10.6, 2.2.0, etc.
         'revision': revision,  # '9fdf926eccce',

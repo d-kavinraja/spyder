@@ -9,13 +9,14 @@ Layout Plugin.
 """
 # Standard library imports
 import configparser as cp
+from functools import lru_cache
 import logging
 import os
 
 # Third party imports
 from qtpy.QtCore import Qt, QByteArray, QSize, QPoint, Slot
-from qtpy.QtGui import QIcon
-from qtpy.QtWidgets import QApplication, QDesktopWidget
+from qtpy.QtGui import QIcon, QKeySequence
+from qtpy.QtWidgets import QApplication
 
 # Local imports
 from spyder.api.exceptions import SpyderAPIError
@@ -24,19 +25,20 @@ from spyder.api.plugins import (
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
 from spyder.api.plugin_registration.registry import PLUGIN_REGISTRY
+from spyder.api.shortcuts import SpyderShortcutsMixin
 from spyder.api.translations import _
 from spyder.api.utils import get_class_values
-from spyder.plugins.mainmenu.api import ApplicationMenus, ViewMenuSections
+from spyder.plugins.mainmenu.api import ApplicationMenus, WindowMenuSections
 from spyder.plugins.layout.container import (
     LayoutContainer, LayoutContainerActions, LayoutPluginMenus)
 from spyder.plugins.layout.layouts import (DefaultLayouts,
                                            HorizontalSplitLayout,
                                            MatlabLayout, RLayout,
                                            SpyderLayout, VerticalSplitLayout)
-from spyder.plugins.preferences.widgets.container import PreferencesActions
+from spyder.plugins.preferences.api import PreferencesActions
 from spyder.plugins.toolbar.api import (
     ApplicationToolbars, MainToolbarSections)
-from spyder.py3compat import qbytearray_to_str  # FIXME:
+from spyder.utils.qthelpers import qbytearray_to_str
 
 
 # For logging
@@ -56,15 +58,18 @@ DEFAULT_LAYOUTS = get_class_values(DefaultLayouts)
 # The current versions are:
 #
 # * Spyder 4: Version 0 (it was the default).
-# * Spyder 5.0.0 to 5.0.5: Version 1 (a bump was required due to the new API).
+# * Spyder 5.0.0: Version 1 (a bump was required due to the new API).
 # * Spyder 5.1.0: Version 2 (a bump was required due to the migration of
 #                            Projects to the new API).
-# * Spyder 5.2.0: Version 3 (a bump was required due to the migration of
+# * Spyder 5.2.0: Version 3 (a bump was required due to the migration of the
 #                            IPython Console to the new API)
-WINDOW_STATE_VERSION = 3
+# * Spyder 6.0.0: Version 4 (a bump was required due to the migration of
+#                            Editor to the new API)
+
+WINDOW_STATE_VERSION = 4
 
 
-class Layout(SpyderPluginV2):
+class Layout(SpyderPluginV2, SpyderShortcutsMixin):
     """
     Layout manager plugin.
     """
@@ -91,7 +96,6 @@ class Layout(SpyderPluginV2):
 
     def on_initialize(self):
         self._last_plugin = None
-        self._first_spyder_run = False
         self._fullscreen_flag = None
         # The following flag remember the maximized state even when
         # the window is in fullscreen mode:
@@ -101,6 +105,15 @@ class Layout(SpyderPluginV2):
         self._saved_normal_geometry = None
         self._state_before_maximizing = None
         self._interface_locked = self.get_conf('panes_locked', section='main')
+        # The following flag is used to apply the window settings only once
+        # during the first run
+        self._window_settings_applied_on_first_run = False
+
+        # If Spyder has already been run once, this option needs to be False.
+        # Note: _first_spyder_run needs to be accessed at least once in this
+        # method to be computed at startup.
+        if not self._first_spyder_run:
+            self.set_conf("first_time", False)
 
         # Register default layouts
         self.register_layout(self, SpyderLayout)
@@ -115,19 +128,20 @@ class Layout(SpyderPluginV2):
     def on_main_menu_available(self):
         mainmenu = self.get_plugin(Plugins.MainMenu)
         container = self.get_container()
-        # Add Panes related actions to View application menu
+        # Add Panes related actions to Window application menu
         panes_items = [
             container._plugins_menu,
             container._lock_interface_action,
+            container._maximize_dockwidget_action,
             container._close_dockwidget_action,
-            container._maximize_dockwidget_action]
+        ]
         for panes_item in panes_items:
             mainmenu.add_item_to_application_menu(
                 panes_item,
-                menu_id=ApplicationMenus.View,
-                section=ViewMenuSections.Pane,
-                before_section=ViewMenuSections.Toolbar)
-        # Add layouts menu to View application menu
+                menu_id=ApplicationMenus.Window,
+                section=WindowMenuSections.Pane,
+                before_section=WindowMenuSections.Toolbar)
+        # Add layouts menu to Window application menu
         layout_items = [
             container._layouts_menu,
             container._toggle_next_layout_action,
@@ -135,14 +149,14 @@ class Layout(SpyderPluginV2):
         for layout_item in layout_items:
             mainmenu.add_item_to_application_menu(
                 layout_item,
-                menu_id=ApplicationMenus.View,
-                section=ViewMenuSections.Layout,
-                before_section=ViewMenuSections.Bottom)
-        # Add fullscreen action to View application menu
+                menu_id=ApplicationMenus.Window,
+                section=WindowMenuSections.Layout,
+                before_section=WindowMenuSections.Bottom)
+        # Add fullscreen action to Window application menu
         mainmenu.add_item_to_application_menu(
             container._fullscreen_action,
-            menu_id=ApplicationMenus.View,
-            section=ViewMenuSections.Bottom)
+            menu_id=ApplicationMenus.Window,
+            section=WindowMenuSections.Bottom)
 
     @on_plugin_available(plugin=Plugins.Toolbar)
     def on_toolbar_available(self):
@@ -159,7 +173,7 @@ class Layout(SpyderPluginV2):
     @on_plugin_teardown(plugin=Plugins.MainMenu)
     def on_main_menu_teardown(self):
         mainmenu = self.get_plugin(Plugins.MainMenu)
-        # Remove Panes related actions from the View application menu
+        # Remove Panes actions from the Window application menu
         panes_items = [
             LayoutPluginMenus.PluginsMenu,
             LayoutContainerActions.LockDockwidgetsAndToolbars,
@@ -168,8 +182,8 @@ class Layout(SpyderPluginV2):
         for panes_item in panes_items:
             mainmenu.remove_item_from_application_menu(
                 panes_item,
-                menu_id=ApplicationMenus.View)
-        # Remove layouts menu from the View application menu
+                menu_id=ApplicationMenus.Window)
+        # Remove layouts menu from the Window application menu
         layout_items = [
             LayoutPluginMenus.LayoutsMenu,
             LayoutContainerActions.NextLayout,
@@ -177,11 +191,11 @@ class Layout(SpyderPluginV2):
         for layout_item in layout_items:
             mainmenu.remove_item_from_application_menu(
                 layout_item,
-                menu_id=ApplicationMenus.View)
-        # Remove fullscreen action from the View application menu
+                menu_id=ApplicationMenus.Window)
+        # Remove fullscreen action from the Window application menu
         mainmenu.remove_item_from_application_menu(
             LayoutContainerActions.Fullscreen,
-            menu_id=ApplicationMenus.View)
+            menu_id=ApplicationMenus.Window)
 
     @on_plugin_teardown(plugin=Plugins.Toolbar)
     def on_toolbar_teardown(self):
@@ -196,14 +210,28 @@ class Layout(SpyderPluginV2):
     def before_mainwindow_visible(self):
         # Update layout menu
         self.update_layout_menu_actions()
-        # Setup layout
+
+        # The layout needs to be applied twice: before and after the main
+        # window is visible (see below). This call avoids weird issues when the
+        # window was not maximized in the last session. See:
+        # https://github.com/spyder-ide/spyder/pull/22232#issuecomment-2224142496
         self.setup_layout(default=False)
 
     def on_mainwindow_visible(self):
-        # Populate `Panes > View` menu.
+        # Populate `Panes > Window` menu.
         # This **MUST** be done before restoring the last visible plugins, so
         # that works as expected.
         self.create_plugins_menu()
+
+        # Setup layout when the window is visible.
+        # This **MUST** be done after creating the plugins menu to correctly
+        # restore the layout from the previous session.
+        # Fixes spyder-ide/spyder#17945 and spyder-ide/spyder#21596
+        self.setup_layout(default=False)
+
+        # Correctly display dock tabbars.
+        # This **MUST** be done after setting up the layout.
+        self._apply_docktabbar_style()
 
         # Restore last visible plugins.
         # This **MUST** be done before running on_mainwindow_visible for the
@@ -216,6 +244,25 @@ class Layout(SpyderPluginV2):
 
     # ---- Private API
     # -------------------------------------------------------------------------
+    @property
+    @lru_cache
+    def _first_spyder_run(self):
+        """
+        Check if Spyder is run for the first time.
+
+        Notes
+        -----
+        * We declare this as a property to prevent reassignments in other
+          places of this class.
+        * It only needs to be computed once at startup (i.e. it needs to be
+          accessed in on_initialize).
+        """
+        # We need to do this double check because we were not using the
+        # "first_time" option in 6.0 and older versions.
+        return (
+            self.get_conf("first_time", True) and self.get_conf("names") == []
+        )
+
     def _get_internal_dockable_plugins(self):
         """Get the list of internal dockable plugins"""
         return get_class_values(DockablePlugins)
@@ -243,6 +290,41 @@ class Layout(SpyderPluginV2):
             text = _('Lock panes and toolbars')
         self.lock_interface_action.setIcon(icon)
         self.lock_interface_action.setText(text)
+
+    def _apply_docktabbar_style(self):
+        """Apply dock tabbar style."""
+        # Apply style by installing the dockwidget tab event filter.
+        plugins = self.get_dockable_plugins()
+        for plugin in plugins:
+            plugin.dockwidget.is_shown = True
+            plugin.dockwidget.install_tab_event_filter()
+
+    def _update_shortcuts_in_plugins_menu(self, show=True):
+        """
+        Show/hide shortcuts for actions in the plugins menu.
+
+        Notes
+        -----
+        Shortcuts in that menu need to disabled when not visible to prevent
+        plugins to be hidden with them.
+        """
+        for plugin in self.get_dockable_plugins():
+            action = plugin.toggle_view_action
+
+            if show:
+                section = plugin.CONF_SECTION
+                try:
+                    context = '_'
+                    name = 'switch to {}'.format(section)
+                    shortcut = self.get_shortcut(
+                        name, context, plugin_name=section
+                    )
+                except (cp.NoSectionError, cp.NoOptionError):
+                    shortcut = QKeySequence()
+            else:
+                shortcut = QKeySequence()
+
+            action.setShortcut(shortcut)
 
     # ---- Helper methods
     # -------------------------------------------------------------------------
@@ -325,36 +407,39 @@ class Layout(SpyderPluginV2):
         settings = self.load_window_settings(prefix, default)
         hexstate = settings[0]
 
-        self._first_spyder_run = False
         if hexstate is None:
             # First Spyder execution:
             self.main.setWindowState(Qt.WindowMaximized)
-            self._first_spyder_run = True
             self.setup_default_layouts(DefaultLayouts.SpyderLayout, settings)
 
-            # Now that the initial setup is done, copy the window settings,
-            # except for the hexstate in the quick layouts sections for the
-            # default layouts.
-            # Order and name of the default layouts is found in config.py
-            section = 'quick_layouts'
-            get_func = self.get_conf_default if default else self.get_conf
-            order = get_func('order', section=section)
-
-            # Restore the original defaults if reset layouts is called
+            # Restore the original defaults. This is necessary, for instance,
+            # when bumping WINDOW_STATE_VERSION because layouts saved with a
+            # previous version can't be applied with the new one
             if default:
-                self.set_conf('active', order, section)
-                self.set_conf('order', order, section)
-                self.set_conf('names', order, section)
-                self.set_conf('ui_names', order, section)
+                order = list(self.get_container().spyder_layouts.keys())
+                self.set_conf('order', order)
+                self.set_conf('active', order)
+                self.set_conf('names', order)
 
+                ui_names = [
+                    l.get_name()
+                    for l in self.get_container().spyder_layouts.values()
+                ]
+                self.set_conf('ui_names', ui_names)
+
+                # This will remove custom layouts from the UI
+                self.get_container().update_layout_menu_actions()
+
+            section = 'quick_layouts'
+            order = self.get_conf('order')
             for index, _name, in enumerate(order):
                 prefix = 'layout_{0}/'.format(index)
-                self.save_current_window_settings(prefix, section,
-                                                  none_state=True)
+                self.save_current_window_settings(
+                    prefix, section, none_state=True
+                )
 
             # Store the initial layout as the default in spyder
             prefix = 'layout_default/'
-            section = 'quick_layouts'
             self.save_current_window_settings(prefix, section, none_state=True)
             self._current_quick_layout = DefaultLayouts.SpyderLayout
 
@@ -365,9 +450,7 @@ class Layout(SpyderPluginV2):
         main = self.main
         main.setUpdatesEnabled(False)
 
-        first_spyder_run = bool(self._first_spyder_run)  # Store copy
-
-        if first_spyder_run:
+        if self._first_spyder_run:
             self.set_window_settings(*settings)
         else:
             if self._last_plugin:
@@ -388,8 +471,8 @@ class Layout(SpyderPluginV2):
         # Apply selected layout
         layout.set_main_window_layout(self.main, self.get_dockable_plugins())
 
-        if first_spyder_run:
-            self._first_spyder_run = False
+        if self._first_spyder_run:
+            self.set_conf("first_time", False)
         else:
             self.main.setMinimumWidth(min_width)
             self.main.setMaximumWidth(max_width)
@@ -412,13 +495,16 @@ class Layout(SpyderPluginV2):
         ----------
         index_or_layout_id: int or str
         """
+        # We need to do this first so the new layout is applied as expected.
+        self.unmaximize_dockwidget()
+
         section = 'quick_layouts'
         container = self.get_container()
         try:
             settings = self.load_window_settings(
-                'layout_{}/'.format(index_or_layout_id), section=section)
-            (hexstate, window_size, prefs_dialog_size, pos, is_maximized,
-             is_fullscreen) = settings
+                'layout_{}/'.format(index_or_layout_id), section=section
+            )
+            hexstate, window_size, pos, is_maximized, is_fullscreen = settings
 
             # The defaults layouts will always be regenerated unless there was
             # an overwrite, either by rewriting with same name, or by deleting
@@ -452,13 +538,12 @@ class Layout(SpyderPluginV2):
 
         # Make sure the flags are correctly set for visible panes
         for plugin in self.get_dockable_plugins():
-            try:
-                # New API
-                action = plugin.toggle_view_action
-            except AttributeError:
-                # Old API
-                action = plugin._toggle_view_action
+            action = plugin.toggle_view_action
             action.setChecked(plugin.dockwidget.isVisible())
+
+        # This is necessary to restore the style for dock tabbars after the
+        # switch
+        self._apply_docktabbar_style()
 
         return index_or_layout_id
 
@@ -474,8 +559,6 @@ class Layout(SpyderPluginV2):
         """
         get_func = self.get_conf_default if default else self.get_conf
         window_size = get_func(prefix + 'size', section=section)
-        prefs_dialog_size = get_func(
-            prefix + 'prefs_dialog_size', section=section)
 
         if default:
             hexstate = None
@@ -487,20 +570,23 @@ class Layout(SpyderPluginV2):
 
         pos = get_func(prefix + 'position', section=section)
 
+        # We use `virtualGeometry` instead of `geometry` below because it gives
+        # the shape of all connected screens, which is what we need here (
+        # `geometry` only works for the current one).
+        screen_shape = self.main.screen().virtualGeometry()
+        current_width = screen_shape.width()
+        current_height = screen_shape.height()
+
         # It's necessary to verify if the window/position value is valid
         # with the current screen. See spyder-ide/spyder#3748.
         width = pos[0]
         height = pos[1]
-        screen_shape = QApplication.desktop().geometry()
-        current_width = screen_shape.width()
-        current_height = screen_shape.height()
         if current_width < width or current_height < height:
             pos = self.get_conf_default(prefix + 'position', section)
 
         is_maximized = get_func(prefix + 'is_maximized', section=section)
         is_fullscreen = get_func(prefix + 'is_fullscreen', section=section)
-        return (hexstate, window_size, prefs_dialog_size, pos, is_maximized,
-                is_fullscreen)
+        return (hexstate, window_size, pos, is_maximized, is_fullscreen)
 
     def get_window_settings(self):
         """
@@ -518,31 +604,37 @@ class Layout(SpyderPluginV2):
             is_maximized = self.main.isMaximized()
 
         pos = (self.window_position.x(), self.window_position.y())
-        prefs_dialog_size = (self.prefs_dialog_size.width(),
-                             self.prefs_dialog_size.height())
 
         hexstate = qbytearray_to_str(
             self.main.saveState(version=WINDOW_STATE_VERSION)
         )
-        return (hexstate, window_size, prefs_dialog_size, pos, is_maximized,
-                is_fullscreen)
+        return (hexstate, window_size, pos, is_maximized, is_fullscreen)
 
-    def set_window_settings(self, hexstate, window_size, prefs_dialog_size,
-                            pos, is_maximized, is_fullscreen):
+    def set_window_settings(self, hexstate, window_size, pos, is_maximized,
+                            is_fullscreen):
         """
-        Set window settings Symetric to the 'get_window_settings' accessor.
+        Set window settings.
+
+        Symetric to the 'get_window_settings' accessor.
         """
-        main = self.main
-        main.setUpdatesEnabled(False)
-        self.prefs_dialog_size = QSize(prefs_dialog_size[0],
-                                       prefs_dialog_size[1])  # width,height
-        main.set_prefs_size(self.prefs_dialog_size)
-        self.window_size = QSize(window_size[0],
-                                 window_size[1])  # width, height
-        self.window_position = QPoint(pos[0], pos[1])  # x,y
-        main.setWindowState(Qt.WindowNoState)
-        main.resize(self.window_size)
-        main.move(self.window_position)
+        # Prevent calling this method multiple times on first run because it
+        # causes main window flickering on Windows and Mac.
+        # Fixes spyder-ide/spyder#15074
+        if (
+            self._window_settings_applied_on_first_run
+            and self._first_spyder_run
+        ):
+            return
+
+        self.main.setUpdatesEnabled(False)
+
+        # Restore window properties
+        self.window_size = QSize(
+            window_size[0], window_size[1] # width, height
+        )
+        self.window_position = QPoint(pos[0], pos[1]) # x, y
+        self.main.resize(self.window_size)
+        self.main.move(self.window_position)
 
         # Window layout
         if hexstate:
@@ -571,6 +663,9 @@ class Layout(SpyderPluginV2):
         elif is_maximized:
             self.main.setWindowState(Qt.WindowMaximized)
 
+        # Settings applied at startup
+        self._window_settings_applied_on_first_run = True
+
         self.main.setUpdatesEnabled(True)
 
     def save_current_window_settings(self, prefix, section='main',
@@ -585,16 +680,10 @@ class Layout(SpyderPluginV2):
         # Fixes spyder-ide/spyder#13882
         win_size = self.main.size()
         pos = self.main.pos()
-        prefs_size = self.prefs_dialog_size
 
         self.set_conf(
             prefix + 'size',
             (win_size.width(), win_size.height()),
-            section=section,
-        )
-        self.set_conf(
-            prefix + 'prefs_dialog_size',
-            (prefs_size.width(), prefs_size.height()),
             section=section,
         )
         self.set_conf(
@@ -609,7 +698,10 @@ class Layout(SpyderPluginV2):
         )
         self.set_conf(
             prefix + 'position',
-            (pos.x(), pos.y()),
+            # We need to do these validations to avoid an error that breaks
+            # doing mouse clicks in WSL.
+            # Fixes spyder-ide/spyder#20851
+            (pos.x() if pos.x() > 0 else 0, pos.y() if pos.y() > 0 else 0),
             section=section,
         )
 
@@ -642,17 +734,9 @@ class Layout(SpyderPluginV2):
         """Search for the currently focused plugin and close it."""
         widget = QApplication.focusWidget()
         for plugin in self.get_dockable_plugins():
-            # TODO: remove old API
-            try:
-                # New API
-                if plugin.get_widget().isAncestorOf(widget):
-                    plugin.toggle_view_action.setChecked(False)
-                    break
-            except AttributeError:
-                # Old API
-                if plugin.isAncestorOf(widget):
-                    plugin._toggle_view_action.setChecked(False)
-                    break
+            if plugin.get_widget().isAncestorOf(widget):
+                plugin.toggle_view_action.setChecked(False)
+                break
 
     @property
     def maximize_action(self):
@@ -667,6 +751,12 @@ class Layout(SpyderPluginV2):
         First call: maximize current dockwidget
         Second call (or restore=True): restore original window layout
         """
+        editor = self.get_plugin(Plugins.Editor, error=False)
+        outline_explorer = self.get_plugin(
+            Plugins.OutlineExplorer,
+            error=False
+        )
+
         if self._state_before_maximizing is None:
             if restore:
                 return
@@ -679,84 +769,51 @@ class Layout(SpyderPluginV2):
 
             for plugin in self.get_dockable_plugins():
                 plugin.dockwidget.hide()
+                if plugin.get_widget().isAncestorOf(focus_widget):
+                    self._last_plugin = plugin
 
-                try:
-                    # New API
-                    if plugin.get_widget().isAncestorOf(focus_widget):
-                        self._last_plugin = plugin
-                except Exception:
-                    # Old API
-                    if plugin.isAncestorOf(focus_widget):
-                        self._last_plugin = plugin
-
-            # Only plugins that have a dockwidget are part of widgetlist,
-            # so last_plugin can be None after the above "for" cycle.
-            # For example, this happens if, after Spyder has started, focus
-            # is set to the Working directory toolbar (which doesn't have
-            # a dockwidget) and then you press the Maximize button
+            # This prevents a possible error when the value of _last_plugin
+            # turns out to be None.
             if self._last_plugin is None:
-                # Using the Editor as default plugin to maximize
-                self._last_plugin = self.get_plugin(Plugins.Editor)
+                # Use the Editor as default plugin to maximize
+                if editor is not None:
+                    self._last_plugin = editor
+                else:
+                    return
 
             # Maximize last_plugin
             self._last_plugin.dockwidget.toggleViewAction().setDisabled(True)
-            try:
-                # New API
-                self.main.setCentralWidget(self._last_plugin.get_widget())
-                self._last_plugin.get_widget().set_maximized_state(True)
-            except AttributeError:
-                # Old API
-                self.main.setCentralWidget(self._last_plugin)
-                self._last_plugin._ismaximized = True
+            self.main.setCentralWidget(self._last_plugin.get_widget())
+            self._last_plugin.get_widget().set_maximized_state(True)
 
             # Workaround to solve an issue with editor's outline explorer:
             # (otherwise the whole plugin is hidden and so is the outline
             # explorer and the latter won't be refreshed if not visible)
-            try:
-                # New API
-                self._last_plugin.get_widget().show()
-                self._last_plugin.change_visibility(True)
-            except AttributeError:
-                # Old API
-                self._last_plugin.show()
-                self._last_plugin._visibility_changed(True)
+            self._last_plugin.get_widget().show()
+            self._last_plugin.change_visibility(True)
 
-            if self._last_plugin is self.main.editor:
-                # Automatically show the outline if the editor was maximized:
-                outline_explorer = self.get_plugin(Plugins.OutlineExplorer)
-                self.main.addDockWidget(
-                    Qt.RightDockWidgetArea,
-                    outline_explorer.dockwidget)
-                outline_explorer.dockwidget.show()
+            if self._last_plugin is editor:
+                # Automatically show the outline if the editor was maximized
+                if outline_explorer is not None:
+                    outline_explorer.dock_with_maximized_editor()
         else:
             # Restore original layout (before maximizing current dockwidget)
-            try:
-                # New API
-                self._last_plugin.dockwidget.setWidget(
-                    self._last_plugin.get_widget())
-            except AttributeError:
-                # Old API
-                self._last_plugin.dockwidget.setWidget(self._last_plugin)
+            self._last_plugin.dockwidget.setWidget(
+                self._last_plugin.get_widget()
+            )
             self._last_plugin.dockwidget.toggleViewAction().setEnabled(True)
             self.main.setCentralWidget(None)
-
-            try:
-                # New API
-                self._last_plugin.get_widget().set_maximized_state(False)
-            except AttributeError:
-                # Old API
-                self._last_plugin._ismaximized = False
-
+            self._last_plugin.get_widget().set_maximized_state(False)
             self.main.restoreState(
                 self._state_before_maximizing, version=WINDOW_STATE_VERSION
             )
             self._state_before_maximizing = None
-            try:
-                # New API
-                self._last_plugin.get_widget().get_focus_widget().setFocus()
-            except AttributeError:
-                # Old API
-                self._last_plugin.get_focus_widget().setFocus()
+
+            if self._last_plugin is editor:
+                if outline_explorer is not None:
+                    outline_explorer.hide_from_maximized_editor()
+
+            self._last_plugin.get_widget().get_focus_widget().setFocus()
 
     def unmaximize_dockwidget(self):
         """Unmaximize any dockable plugin."""
@@ -771,14 +828,9 @@ class Layout(SpyderPluginV2):
         is_maximized = False
 
         if last_plugin is not None:
-            try:
-                # New API
-                is_maximized = (
-                    last_plugin.get_widget().get_maximized_state()
-                )
-            except AttributeError:
-                # Old API
-                is_maximized = last_plugin._ismaximized
+            is_maximized = (
+                last_plugin.get_widget().get_maximized_state()
+            )
 
         if (
             last_plugin is not None
@@ -799,46 +851,30 @@ class Layout(SpyderPluginV2):
         """
         last_plugin = self.get_last_plugin()
 
-        try:
-            # New API
-            if (
-                last_plugin is not None
-                and last_plugin.get_widget().get_maximized_state()
-                and last_plugin is not plugin
-            ):
-                if self.maximize_action.isChecked():
-                    self.maximize_action.setChecked(False)
-                else:
-                    self.maximize_action.setChecked(True)
-        except AttributeError:
-            # Old API
-            if (
-                last_plugin is not None
-                and last_plugin._ismaximized
-                and last_plugin is not plugin
-            ):
-                if self.maximize_action.isChecked():
-                    self.maximize_action.setChecked(False)
-                else:
-                    self.maximize_action.setChecked(True)
+        if (
+            last_plugin is not None
+            and last_plugin.get_widget().get_maximized_state()
+            and last_plugin is not plugin
+        ):
+            if self.maximize_action.isChecked():
+                self.maximize_action.setChecked(False)
+            else:
+                self.maximize_action.setChecked(True)
 
-        try:
-            # New API
-            if not plugin.toggle_view_action.isChecked():
-                plugin.toggle_view_action.setChecked(True)
-                plugin.get_widget().is_visible = False
-        except AttributeError:
-            # Old API
-            if not plugin._toggle_view_action.isChecked():
-                plugin._toggle_view_action.setChecked(True)
-                plugin._widget._is_visible = False
+        if not plugin.toggle_view_action.isChecked():
+            plugin.toggle_view_action.setChecked(True)
+            plugin.get_widget().is_visible = False
 
-        try:
-            # New API
+        if plugin.get_widget().windowwidget:
+            # This is necessary to give focus to undocked plugin windows
+            # from plugins in the main one when using the "switch to
+            # plugin" shortcuts. It also allows to switch between different
+            # undocked windows with those shortcuts.
+            # Fixes spyder-ide/spyder#1351
+            plugin.get_widget().windowwidget.activateWindow()
+        else:
             plugin.change_visibility(True, force_focus=force_focus)
-        except AttributeError:
-            # Old API
-            plugin._visibility_changed(True)
+            self.main.activateWindow()
 
     # ---- Menus and actions
     # -------------------------------------------------------------------------
@@ -871,11 +907,7 @@ class Layout(SpyderPluginV2):
                                     | Qt.FramelessWindowHint
                                     | Qt.WindowStaysOnTopHint)
 
-                screen_number = QDesktopWidget().screenNumber(main)
-                if screen_number < 0:
-                    screen_number = 0
-
-                r = QApplication.desktop().screenGeometry(screen_number)
+                r = main.screen().geometry()
                 main.setGeometry(
                     r.left() - 1, r.top() - 1, r.width() + 2, r.height() + 2)
                 main.showNormal()
@@ -892,21 +924,30 @@ class Layout(SpyderPluginV2):
         """
         Populate panes menu with the toggle view action of each base plugin.
         """
-        order = ['editor', 'ipython_console', 'variable_explorer',
-                 'debugger', 'help', 'plots', None, 'explorer',
-                 'outline_explorer', 'project_explorer', 'find_in_files', None,
-                 'historylog', 'profiler', 'pylint', None,
-                 'onlinehelp', 'internal_console', None]
+        order = [
+            "editor",
+            "ipython_console",
+            "variable_explorer",
+            "debugger",
+            "help",
+            "plots",
+            None,
+            "explorer",
+            "outline_explorer",
+            "project_explorer",
+            "find_in_files",
+            None,
+            "historylog",
+            "profiler",
+            "pylint",
+            None,
+            "onlinehelp",
+            "internal_console",
+            None,
+        ]
 
         for plugin in self.get_dockable_plugins():
-            try:
-                # New API
-                action = plugin.toggle_view_action
-            except AttributeError:
-                # Old API
-                action = plugin._toggle_view_action
-                action.action_id = f'switch to {plugin.CONF_SECTION}'
-
+            action = plugin.toggle_view_action
             if action:
                 # Plugins that fail their compatibility checks don't have a
                 # dockwidget. So, we need to skip them from the plugins menu.
@@ -930,7 +971,18 @@ class Layout(SpyderPluginV2):
         actions = order[:]
         for action in actions:
             if type(action) is not str:
-                self.get_container()._plugins_menu.add_action(action)
+                self.plugins_menu.add_action(action)
+
+        # Enable shortcuts when the menu is visible so users can see they are
+        # available. And disable those shortcuts when the menu is hidden
+        # because they allow to hide plugins when pressed twice. See:
+        # https://github.com/spyder-ide/spyder/issues/22189#issuecomment-2248644546
+        self.plugins_menu.aboutToShow.connect(
+            lambda: self._update_shortcuts_in_plugins_menu(show=True)
+        )
+        self.plugins_menu.aboutToHide.connect(
+            lambda: self._update_shortcuts_in_plugins_menu(show=False)
+        )
 
     @property
     def lock_interface_action(self):
@@ -974,8 +1026,19 @@ class Layout(SpyderPluginV2):
 
         # This should only be necessary the first time this method is run
         if not visible_plugins:
-            visible_plugins = [Plugins.IPythonConsole, Plugins.Help,
-                               Plugins.Editor]
+            visible_plugins = [
+                Plugins.IPythonConsole,
+                Plugins.Help,
+                Plugins.VariableExplorer,  # In case Help is not available
+                Plugins.Editor,
+            ]
+
+        # This is necessary because the visible state of dockable plugins is
+        # not set correctly for all of them at startup. So, we make it False
+        # first for all of them to then set it to True only for those that were
+        # visible during the last session.
+        for plugin in self.get_dockable_plugins():
+            plugin.change_visibility(False)
 
         # Restore visible plugins
         for plugin in visible_plugins:
@@ -986,7 +1049,7 @@ class Layout(SpyderPluginV2):
                 and plugin_class.dockwidget is not None
                 and plugin_class.dockwidget.isVisible()
             ):
-                plugin_class.dockwidget.raise_()
+                plugin_class.change_visibility(True, force_focus=False)
 
     def save_visible_plugins(self):
         """Save visible plugins."""
@@ -994,14 +1057,8 @@ class Layout(SpyderPluginV2):
 
         visible_plugins = []
         for plugin in self.get_dockable_plugins():
-            try:
-                # New API
-                if plugin.get_widget().is_visible:
-                    visible_plugins.append(plugin.NAME)
-            except AttributeError:
-                # Old API
-                if plugin._isvisible:
-                    visible_plugins.append(plugin.NAME)
+            if plugin.get_widget().is_visible:
+                visible_plugins.append(plugin.NAME)
 
         self.set_conf('last_visible_plugins', visible_plugins)
 
@@ -1039,7 +1096,14 @@ class Layout(SpyderPluginV2):
             return False
 
         # Get the actual plugins from their names
-        next_to_plugins = [self.get_plugin(p) for p in next_to_plugins]
+        next_to_plugins = [
+            self.get_plugin(p, error=False) for p in next_to_plugins
+        ]
+
+        # Remove not available plugins from next_to_plugins
+        next_to_plugins = [
+            p for p in next_to_plugins if p is not None
+        ]
 
         if plugin.get_conf('first_time', True):
             # This tabifies external and internal plugins that are loaded for
@@ -1125,10 +1189,14 @@ class Layout(SpyderPluginV2):
                 if plugin:
                     self.tabify_plugin(plugin, Plugins.Console)
 
-        # Tabify new external plugins
+        # Tabify any new plugin that was not available in the previous session.
+        # This can include internal plugins that were automatically disabled
+        # in the first session (e.g. due to the lack of WebEngine).
         for plugin in self.get_dockable_plugins():
-            if (
-                plugin.NAME in PLUGIN_REGISTRY.external_plugins
-                and plugin.get_conf('first_time', True)
-            ):
+            if plugin.get_conf('first_time', True):
                 self.tabify_plugin(plugin, Plugins.Console)
+
+                # This is necessary in case the plugin doesn't set its TABIFY
+                # constant
+                plugin.set_conf("enable", True)
+                plugin.set_conf("first_time", False)

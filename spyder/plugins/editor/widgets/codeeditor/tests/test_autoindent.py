@@ -15,7 +15,6 @@ import pytest
 
 # Local imports
 from spyder.utils.qthelpers import qapplication
-from spyder.py3compat import to_text_string
 from spyder.plugins.editor.widgets.codeeditor import CodeEditor
 
 
@@ -37,7 +36,7 @@ def get_indent_fix(text, indent_chars=" " * 4, tab_stop_width_spaces=4,
         cursor.movePosition(QTextCursor.Left, n=repeat)
     editor.setTextCursor(cursor)
     editor.fix_indent(forward=forward)
-    return to_text_string(editor.toPlainText())
+    return str(editor.toPlainText())
 
 
 # ---- Tests
@@ -469,10 +468,8 @@ def test_copy_paste_autoindent(codeeditor):
     # Copy
     cursor = editor.textCursor()
     cursor.setPosition(30)
-    cursor.setPosition(59, QTextCursor.KeepAnchor)
+    cursor.setPosition(51, QTextCursor.KeepAnchor)
     editor.setTextCursor(cursor)
-    cb = QApplication.clipboard()
-    cb.setText("d\n    if e:\n        f", mode=cb.Clipboard)
     editor.copy()
 
     d = {
@@ -495,10 +492,8 @@ def test_copy_paste_autoindent(codeeditor):
     # Copy
     cursor = editor.textCursor()
     cursor.setPosition(30-4)
-    cursor.setPosition(59, QTextCursor.KeepAnchor)
+    cursor.setPosition(51, QTextCursor.KeepAnchor)
     editor.setTextCursor(cursor)
-    cb = QApplication.clipboard()
-    cb.setText("    d\n    if e:\n        f", mode=cb.Clipboard)
     editor.copy()
 
     d = {

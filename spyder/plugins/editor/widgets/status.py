@@ -12,7 +12,6 @@ import os.path as osp
 # Local imports
 from spyder.api.widgets.status import StatusBarWidget
 from spyder.api.translations import _
-from spyder.py3compat import to_text_string
 from spyder.utils.workers import WorkerManager
 from spyder.utils.vcs import get_git_refs
 
@@ -37,7 +36,7 @@ class EOLStatus(StatusBarWidget):
 
     def update_eol(self, os_name):
         """Update end of line status."""
-        os_name = to_text_string(os_name)
+        os_name = str(os_name)
         value = {"nt": "CRLF", "posix": "LF"}.get(os_name, "CR")
         self.set_value(value)
 
@@ -118,7 +117,13 @@ class VCSStatus(StatusBarWidget):
 
     def process_git_data(self, worker, output, error):
         """Receive data from git and update gui."""
-        branches, branch, files_modified = output
+        # Output can be None under some circumstances, so we need to deal with
+        # it here.
+        # Fixes spyder-ide/spyder#21865
+        if output is None:
+            branch, files_modified = None, []
+        else:
+            __, branch, files_modified = output
 
         text = branch if branch else ''
         if len(files_modified):

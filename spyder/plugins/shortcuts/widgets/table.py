@@ -8,26 +8,34 @@
 
 # Standard library importsimport re
 import re
+from typing import List
 
 # Third party imports
+from qtawesome import IconWidget
 from qtpy.compat import from_qvariant, to_qvariant
 from qtpy.QtCore import (QAbstractTableModel, QEvent, QModelIndex,
-                         QSortFilterProxyModel, Qt, Slot, QRegExp)
-from qtpy.QtGui import QIcon, QKeySequence, QRegExpValidator
+                         QSortFilterProxyModel, Qt, Slot, QRegularExpression)
+from qtpy.QtGui import QIcon, QKeySequence, QRegularExpressionValidator
 from qtpy.QtWidgets import (QAbstractItemView, QApplication, QDialog,
                             QGridLayout, QHBoxLayout, QKeySequenceEdit,
-                            QLabel, QLineEdit, QMessageBox, QPushButton,
-                            QSpacerItem, QVBoxLayout)
+                            QLabel, QLayout, QLineEdit, QMessageBox,
+                            QPushButton, QSpacerItem, QVBoxLayout, QStyle)
 
 # Local imports
+from spyder.api.shortcuts import SpyderShortcutsMixin
 from spyder.api.translations import _
-from spyder.config.manager import CONF
+from spyder.config.manager import CONF, NoDefault
+from spyder.plugins.shortcuts.utils import ShortcutData
 from spyder.utils.icon_manager import ima
-from spyder.utils.palette import QStylePalette
+from spyder.utils.palette import SpyderPalette
 from spyder.utils.qthelpers import create_toolbutton
 from spyder.utils.stringmatching import get_search_regex, get_search_scores
 from spyder.widgets.helperwidgets import (
-    HelperToolButton, HTMLDelegate, HoverRowsTableView, VALID_FINDER_CHARS)
+    ClearLineEdit,
+    HTMLDelegate,
+    HoverRowsTableView,
+    VALID_FINDER_CHARS,
+)
 
 
 # Valid shortcut keys
@@ -59,7 +67,7 @@ class ShortcutTranslator(QKeySequenceEdit):
     """
 
     def __init__(self):
-        super(ShortcutTranslator, self).__init__()
+        super().__init__()
         self.hide()
 
     def keyevent_to_keyseq(self, event):
@@ -85,12 +93,12 @@ class ShortcutLineEdit(QLineEdit):
     """QLineEdit that filters its key press and release events."""
 
     def __init__(self, parent):
-        super(ShortcutLineEdit, self).__init__(parent)
+        super().__init__(parent)
         self.setReadOnly(True)
 
         tw = self.fontMetrics().width(
             "Ctrl+Shift+Alt+Backspace, Ctrl+Shift+Alt+Backspace")
-        fw = self.style().pixelMetric(self.style().PM_DefaultFrameWidth)
+        fw = self.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth)
         self.setMinimumWidth(tw + (2 * fw) + 4)
         # We need to add 4 to take into account the horizontalMargin of the
         # line edit, whose value is hardcoded in qt.
@@ -106,10 +114,10 @@ class ShortcutLineEdit(QLineEdit):
     def setText(self, sequence):
         """Qt method extension."""
         self.setToolTip(sequence)
-        super(ShortcutLineEdit, self).setText(sequence)
+        super().setText(sequence)
 
 
-class ShortcutFinder(QLineEdit):
+class ShortcutFinder(ClearLineEdit):
     """Textbox for filtering listed shortcuts in the table."""
 
     def __init__(self, parent, callback=None, main=None,
@@ -119,8 +127,8 @@ class ShortcutFinder(QLineEdit):
         self.main = main
 
         # Widget setup
-        regex = QRegExp(regex_base + "{100}")
-        self.setValidator(QRegExpValidator(regex))
+        regex = QRegularExpression(regex_base + "{100}")
+        self.setValidator(QRegularExpressionValidator(regex))
 
         # Signals
         if callback:
@@ -136,14 +144,14 @@ class ShortcutFinder(QLineEdit):
         elif key in [Qt.Key_Enter, Qt.Key_Return]:
             self._parent.show_editor()
         else:
-            super(ShortcutFinder, self).keyPressEvent(event)
+            super().keyPressEvent(event)
 
 
 class ShortcutEditor(QDialog):
     """A dialog for entering key sequences."""
 
     def __init__(self, parent, context, name, sequence, shortcuts):
-        super(ShortcutEditor, self).__init__(parent)
+        super().__init__(parent)
         self._parent = parent
         self.setWindowFlags(self.windowFlags() &
                             ~Qt.WindowContextHelpButtonHint)
@@ -170,24 +178,19 @@ class ShortcutEditor(QDialog):
     def setup(self):
         """Setup the ShortcutEditor with the provided arguments."""
         # Widgets
-        icon_info = HelperToolButton()
-        icon_info.setIcon(ima.get_std_icon('MessageBoxInformation'))
-        layout_icon_info = QVBoxLayout()
-        layout_icon_info.setContentsMargins(0, 0, 0, 0)
-        layout_icon_info.setSpacing(0)
-        layout_icon_info.addWidget(icon_info)
-        layout_icon_info.addStretch(100)
-
         self.label_info = QLabel()
         self.label_info.setText(
-            _("Press the new shortcut and select 'Ok' to confirm, "
-              "click 'Cancel' to revert to the previous state, "
-              "or use 'Clear' to unbind the command from a shortcut."))
+            _(
+                "Press the new shortcut and select <b>Ok</b> to confirm, "
+                "click <b>Cancel</b> to revert to the previous state, "
+                "use <b>Clear</b> to unbind the command from a shortcut "
+                "or press <b>Default</b> to restore the default shortcut."
+            )
+        )
         self.label_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.label_info.setWordWrap(True)
         layout_info = QHBoxLayout()
         layout_info.setContentsMargins(0, 0, 0, 0)
-        layout_info.addLayout(layout_icon_info)
         layout_info.addWidget(self.label_info)
         layout_info.setStretch(1, 100)
 
@@ -198,53 +201,44 @@ class ShortcutEditor(QDialog):
         self.text_new_sequence = ShortcutLineEdit(self)
         self.text_new_sequence.setPlaceholderText(_("Press shortcut."))
 
-        self.helper_button = HelperToolButton()
+        self.helper_button = IconWidget(parent=self)
         self.helper_button.setIcon(QIcon())
         self.label_warning = QLabel()
         self.label_warning.setWordWrap(True)
         self.label_warning.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         self.button_default = QPushButton(_('Default'))
+        self.button_clear = QPushButton(_('Clear'))
         self.button_ok = QPushButton(_('Ok'))
         self.button_ok.setEnabled(False)
-        self.button_clear = QPushButton(_('Clear'))
         self.button_cancel = QPushButton(_('Cancel'))
         button_box = QHBoxLayout()
         button_box.addWidget(self.button_default)
+        button_box.addWidget(self.button_clear)
         button_box.addStretch(100)
         button_box.addWidget(self.button_ok)
-        button_box.addWidget(self.button_clear)
         button_box.addWidget(self.button_cancel)
 
         # New Sequence button box
         self.btn_clear_sequence = create_toolbutton(
-            self, icon=ima.icon('editclear'),
+            self, icon=ima.icon('filecloseall'),
             tip=_("Clear all entered key sequences"),
-            triggered=self.clear_new_sequence)
+            triggered=self.clear_new_sequence
+        )
         self.button_back_sequence = create_toolbutton(
-            self, icon=ima.icon('previous'),
+            self, icon=ima.icon('fileclose'),
             tip=_("Remove last key sequence entered"),
-            triggered=self.back_new_sequence)
+            triggered=self.back_new_sequence
+        )
 
         newseq_btnbar = QHBoxLayout()
-        newseq_btnbar.setSpacing(0)
+        newseq_btnbar.setSpacing(3)
         newseq_btnbar.setContentsMargins(0, 0, 0, 0)
         newseq_btnbar.addWidget(self.button_back_sequence)
         newseq_btnbar.addWidget(self.btn_clear_sequence)
 
         # Setup widgets
         self.setWindowTitle(_('Shortcut: {0}').format(self.name))
-        self.helper_button.setToolTip('')
-        style = """
-            QToolButton {
-              margin:1px;
-              border: 0px solid grey;
-              padding:0px;
-              border-radius: 0px;
-            }"""
-        self.helper_button.setStyleSheet(style)
-        icon_info.setToolTip('')
-        icon_info.setStyleSheet(style)
 
         # Layout
         layout_sequence = QGridLayout()
@@ -265,7 +259,7 @@ class ShortcutEditor(QDialog):
         layout.addLayout(layout_sequence)
         layout.addSpacing(10)
         layout.addLayout(button_box)
-        layout.setSizeConstraint(layout.SetFixedSize)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
         # Signals
         self.button_ok.clicked.connect(self.accept_override)
@@ -290,7 +284,7 @@ class ShortcutEditor(QDialog):
         # Qt.NoFocus for the buttons, if the cancel button was clicked without
         # first setting focus to the button, it would cause a seg fault crash.
         self.button_cancel.setFocus()
-        super(ShortcutEditor, self).reject()
+        super().reject()
 
     @Slot()
     def accept(self):
@@ -299,7 +293,7 @@ class ShortcutEditor(QDialog):
         # Qt.NoFocus for the buttons, if the cancel button was clicked without
         # first setting focus to the button, it would cause a seg fault crash.
         self.button_ok.setFocus()
-        super(ShortcutEditor, self).accept()
+        super().accept()
 
     def event(self, event):
         """Qt method override."""
@@ -313,7 +307,7 @@ class ShortcutEditor(QDialog):
         elif event.type() in [QEvent.KeyPress, QEvent.Shortcut]:
             return True
         else:
-            return super(ShortcutEditor, self).event(event)
+            return super().event(event)
 
     def keyPressEvent(self, event):
         """Qt method override."""
@@ -341,6 +335,7 @@ class ShortcutEditor(QDialog):
             return conflicts
 
         new_qsequence = self.new_qsequence
+        no_match = QKeySequence.SequenceMatch.NoMatch
         for shortcut in self.shortcuts:
             shortcut_qsequence = QKeySequence.fromString(str(shortcut.key))
             if shortcut_qsequence.isEmpty():
@@ -348,8 +343,8 @@ class ShortcutEditor(QDialog):
             if (shortcut.context, shortcut.name) == (self.context, self.name):
                 continue
             if shortcut.context in [self.context, '_'] or self.context == '_':
-                if (shortcut_qsequence.matches(new_qsequence) or
-                        new_qsequence.matches(shortcut_qsequence)):
+                if (shortcut_qsequence.matches(new_qsequence) != no_match or
+                        new_qsequence.matches(shortcut_qsequence) != no_match):
                     conflicts.append(shortcut)
         return conflicts
 
@@ -407,24 +402,28 @@ class ShortcutEditor(QDialog):
                 tip_body += ' - {0}: <b>{1}</b><br>'.format(s.context, s.name)
             tip_body += '<br>'
             if len(conflicts) == 1:
-                tip_override = _("Press 'Ok' to unbind it and assign it to")
+                tip_override = _(
+                    "Press 'Ok' to unbind it and assign the shortcut to"
+                )
             else:
-                tip_override = _("Press 'Ok' to unbind them and assign it to")
+                tip_override = _(
+                    "Press 'Ok' to unbind them and assign the shortcut to"
+                )
             tip_override += ' <b>{}</b>.'.format(self.name)
             tip = template.format(tip_title, tip_body, tip_override)
-            icon = ima.get_std_icon('MessageBoxWarning')
+            icon = ima.icon('warning')
         elif new_sequence in BLACKLIST:
             warning = IN_BLACKLIST
             tip = _('This key sequence is forbidden.')
-            icon = ima.get_std_icon('MessageBoxWarning')
+            icon = ima.icon('warning')
         elif self.check_singlekey() is False or self.check_ascii() is False:
             warning = INVALID_KEY
             tip = _('This key sequence is invalid.')
-            icon = ima.get_std_icon('MessageBoxWarning')
+            icon = ima.icon('warning')
         else:
             warning = NO_WARNING
             tip = _('This key sequence is valid.')
-            icon = ima.get_std_icon('DialogApplyButton')
+            icon = ima.icon('dependency_ok')
 
         self.warning = warning
         self.conflicts = conflicts
@@ -446,7 +445,7 @@ class ShortcutEditor(QDialog):
         """Set the new sequence to the default value defined in the config."""
         sequence = CONF.get_default(
             'shortcuts', "{}/{}".format(self.context, self.name))
-        if sequence:
+        if sequence and sequence is not NoDefault:
             self._qsequences = sequence.split(', ')
             self.update_warning()
         else:
@@ -476,25 +475,26 @@ class ShortcutEditor(QDialog):
         self.accept()
 
 
-class Shortcut(object):
+class Shortcut(SpyderShortcutsMixin):
     """Shortcut convenience class for holding shortcut context, name,
     original ordering index, key sequence for the shortcut and localized text.
     """
 
-    def __init__(self, context, name, key=None):
+    def __init__(self, context, name, key=None, plugin_name=None):
         self.index = 0  # Sorted index. Populated when loading shortcuts
         self.context = context
         self.name = name
         self.key = key
+        self.plugin_name = plugin_name
 
     def __str__(self):
         return "{0}/{1}: {2}".format(self.context, self.name, self.key)
 
     def load(self):
-        self.key = CONF.get_shortcut(self.context, self.name)
+        self.key = self.get_shortcut(self.name, self.context, self.plugin_name)
 
     def save(self):
-        CONF.set_shortcut(self.context, self.name, self.key)
+        self.set_shortcut(self.key, self.name, self.context, self.plugin_name)
 
 
 CONTEXT, NAME, SEQUENCE, SEARCH_SCORE = [0, 1, 2, 3]
@@ -515,8 +515,8 @@ class ShortcutsModel(QAbstractTableModel):
         self.widths = []
 
         # Needed to compensate for the HTMLDelegate color selection unawarness
-        self.text_color = QStylePalette.COLOR_TEXT_1
-        self.text_color_highlight = QStylePalette.COLOR_TEXT_1
+        self.text_color = SpyderPalette.COLOR_TEXT_1
+        self.text_color_highlight = SpyderPalette.COLOR_TEXT_1
 
     def current_index(self):
         """Get the currently selected index in the parent table view."""
@@ -532,8 +532,8 @@ class ShortcutsModel(QAbstractTableModel):
     def flags(self, index):
         """Qt Override."""
         if not index.isValid():
-            return Qt.ItemIsEnabled
-        return Qt.ItemFlags(int(QAbstractTableModel.flags(self, index)))
+            return Qt.ItemFlag.ItemIsEnabled
+        return QAbstractTableModel.flags(self, index)
 
     def data(self, index, role=Qt.DisplayRole):
         """Qt Override."""
@@ -646,10 +646,10 @@ class ShortcutsModel(QAbstractTableModel):
 
 class ShortcutsTable(HoverRowsTableView):
     def __init__(self, parent=None):
-        HoverRowsTableView.__init__(self, parent)
+        HoverRowsTableView.__init__(self, parent, custom_delegate=True)
         self._parent = parent
         self.finder = None
-        self.shortcut_data = None
+        self.shortcut_data: List[ShortcutData] = []
         self.source_model = ShortcutsModel(self)
         self.proxy_model = ShortcutsSortFilterProxy(self)
         self.last_regex = ''
@@ -667,10 +667,10 @@ class ShortcutsTable(HoverRowsTableView):
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setSortingEnabled(True)
         self.setEditTriggers(QAbstractItemView.AllEditTriggers)
-        self.selectionModel().selectionChanged.connect(self.selection)
 
         self.verticalHeader().hide()
 
+        # To highlight the entire row on hover
         self.sig_hover_index_changed.connect(
             self.itemDelegate().on_hover_index_changed
         )
@@ -686,17 +686,12 @@ class ShortcutsTable(HoverRowsTableView):
     def focusOutEvent(self, e):
         """Qt Override."""
         self.source_model.update_active_row()
-        super(ShortcutsTable, self).focusOutEvent(e)
+        super().focusOutEvent(e)
 
     def focusInEvent(self, e):
         """Qt Override."""
-        super(ShortcutsTable, self).focusInEvent(e)
+        super().focusInEvent(e)
         self.selectRow(self.currentIndex().row())
-
-    def selection(self, index):
-        """Update selected row."""
-        self.update()
-        self.isActiveWindow()
 
     def adjust_cells(self):
         """Adjust column size based on contents."""
@@ -711,24 +706,29 @@ class ShortcutsTable(HoverRowsTableView):
 
     def load_shortcuts(self):
         """Load shortcuts and assign to table model."""
-        # item[1] -> context, item[2] -> name
-        # Data might be capitalized so we user lower()
+        # Data might be capitalized so we use lower() below.
         # See: spyder-ide/spyder/#12415
-        shortcut_data = set([(item[1].lower(), item[2].lower()) for item
-                             in self.shortcut_data])
-        shortcut_data = list(sorted(set(shortcut_data)))
-        shortcuts = []
+        shortcut_data = {
+            (data.context.lower(), data.name.lower()): (
+                data.plugin_name
+                if data.plugin_name is not None
+                else data.plugin_name
+            )
+            for data in self.shortcut_data
+        }
 
+        shortcuts = []
         for context, name, keystr in CONF.iter_shortcuts():
             if (context, name) in shortcut_data:
                 context = context.lower()
                 name = name.lower()
-                # Only add to table actions that are registered from the main
-                # window
-                shortcut = Shortcut(context, name, keystr)
+                plugin_name = shortcut_data[(context, name)]
+                shortcut = Shortcut(context, name, keystr, plugin_name)
                 shortcuts.append(shortcut)
 
-        shortcuts = sorted(shortcuts, key=lambda item: item.context+item.name)
+        shortcuts = sorted(
+            shortcuts, key=lambda item: item.context + item.name
+        )
 
         # Store the original order of shortcuts
         for i, shortcut in enumerate(shortcuts):
@@ -756,8 +756,10 @@ class ShortcutsTable(HoverRowsTableView):
                    and (sh1.context == sh2.context or sh1.context == '_' or
                         sh2.context == '_'):
                     conflicts.append((sh1, sh2))
+
         if conflicts:
-            self.parent().show_this_page.emit()
+            if self.parent() is not None:
+                self.parent().show_this_page.emit()
             cstr = "\n".join(['%s <---> %s' % (sh1, sh2)
                               for sh1, sh2 in conflicts])
             QMessageBox.warning(self, _("Conflicts"),
@@ -828,7 +830,7 @@ class ShortcutsTable(HoverRowsTableView):
         elif key in [Qt.Key_Backtab]:
             self.parent().reset_btn.setFocus()
         elif key in [Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right]:
-            super(ShortcutsTable, self).keyPressEvent(event)
+            super().keyPressEvent(event)
         elif key not in [Qt.Key_Escape, Qt.Key_Space]:
             text = event.text()
             if text:
@@ -841,7 +843,6 @@ class ShortcutsTable(HoverRowsTableView):
     def mouseDoubleClickEvent(self, event):
         """Qt Override."""
         self.show_editor()
-        self.update()
 
 
 class ShortcutsSortFilterProxy(QSortFilterProxyModel):
@@ -849,7 +850,7 @@ class ShortcutsSortFilterProxy(QSortFilterProxyModel):
 
     def __init__(self, parent=None):
         """Initialize the multiple sort filter proxy."""
-        super(ShortcutsSortFilterProxy, self).__init__(parent)
+        super().__init__(parent)
         self._parent = parent
         self.pattern = re.compile(r'')
         self.filters = {}
@@ -911,7 +912,9 @@ def load_shortcuts_data():
     for context, name, __ in CONF.iter_shortcuts():
         context = context.lower()
         name = name.lower()
-        shortcut_data.append((None, context, name, None, None))
+        shortcut_data.append(
+            ShortcutData(qobject=None, name=name, context=context)
+        )
     return shortcut_data
 
 

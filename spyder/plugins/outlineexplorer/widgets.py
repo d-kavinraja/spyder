@@ -21,7 +21,7 @@ from qtpy.QtWidgets import QTreeWidgetItem, QTreeWidgetItemIterator
 
 # Local imports
 from spyder.api.config.decorators import on_conf_change
-from spyder.config.base import _
+from spyder.api.translations import _
 from spyder.utils.icon_manager import ima
 from spyder.plugins.completion.api import SymbolKind, SYMBOL_KIND_ICON
 from spyder.utils.qthelpers import set_item_user_text
@@ -266,6 +266,7 @@ class OutlineExplorerTreeWidget(OneColumnTree):
         self._current_editor = None
         self._languages = []
         self.is_visible = False
+        self._symbols_expanded_state: dict[str, bool] = {}
 
         self.currentItemChanged.connect(self.selection_switched)
         self.itemExpanded.connect(self.tree_item_expanded)
@@ -597,6 +598,11 @@ class OutlineExplorerTreeWidget(OneColumnTree):
             symbol_end = symbol_range['end']['line']
             symbol_repr = SymbolStatus(symbol_name, symbol_kind,
                                        (symbol_start, symbol_end), None)
+            if self._symbols_expanded_state.get(symbol_name):
+                symbol_repr.status = True
+            else:
+                self._symbols_expanded_state[symbol_name] = False
+                symbol_repr.status = False
             tree_info.append((symbol_start, symbol_end + 1, symbol_repr))
 
         tree = IntervalTree.from_tuples(tree_info)
@@ -608,8 +614,7 @@ class OutlineExplorerTreeWidget(OneColumnTree):
         if not must_update:
             # Compare with current tree to check if it's necessary to update
             # it.
-            changes = tree - current_tree
-            if tree and len(changes) == 0:
+            if tree == current_tree:
                 logger.debug(
                     f"Current and new trees for file {editor.fname} are the "
                     f"same, so no update is necessary"
@@ -772,7 +777,7 @@ class OutlineExplorerTreeWidget(OneColumnTree):
             iterator += 1
         return items
 
-    def activated(self, item):
+    def on_item_activated(self, item):
         """Double-click event"""
         editor_root = self.editor_items.get(
             self.editor_ids.get(self.current_editor))
@@ -801,11 +806,11 @@ class OutlineExplorerTreeWidget(OneColumnTree):
                     break
             break
 
-    def clicked(self, item):
+    def on_item_clicked(self, item):
         """Click event"""
         if isinstance(item, FileRootItem):
             self.root_item_selected(item)
-        self.activated(item)
+        self.on_item_activated(item)
 
     def selection_switched(self, current_item, previous_item):
         if current_item is not None:
@@ -818,10 +823,12 @@ class OutlineExplorerTreeWidget(OneColumnTree):
     def tree_item_collapsed(self, item):
         ref = item.ref
         ref.status = False
+        self._symbols_expanded_state[ref.name] = False
 
     def tree_item_expanded(self, item):
         ref = item.ref
         ref.status = True
+        self._symbols_expanded_state[ref.name] = True
 
     def set_editors_to_update(self, language, reset_info=False):
         """Set editors to update per language."""

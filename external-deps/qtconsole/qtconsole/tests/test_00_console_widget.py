@@ -2,7 +2,6 @@ import os
 import unittest
 import sys
 
-from flaky import flaky
 import pytest
 
 from qtpy import QtCore, QtGui, QtWidgets
@@ -34,7 +33,7 @@ def qtconsole(qtbot):
     console.window.close()
 
 
-@flaky(max_runs=3)
+@pytest.mark.flaky(max_runs=3)
 @pytest.mark.parametrize(
     "debug", [True, False])
 def test_scroll(qtconsole, qtbot, debug):
@@ -141,7 +140,7 @@ def test_scroll(qtconsole, qtbot, debug):
     assert scroll_bar.value() > prev_position
 
 
-@flaky(max_runs=3)
+@pytest.mark.flaky(max_runs=3)
 def test_input(qtconsole, qtbot):
     """
     Test input function
@@ -174,7 +173,7 @@ def test_input(qtconsole, qtbot):
     assert 'name: test\ntest' in control.toPlainText()
 
 
-@flaky(max_runs=3)
+@pytest.mark.flaky(max_runs=3)
 def test_debug(qtconsole, qtbot):
     """
     Make sure the cursor works while debugging
@@ -208,7 +207,7 @@ def test_debug(qtconsole, qtbot):
     assert control.toPlainText().strip().split()[-1] == "abcd"
 
 
-@flaky(max_runs=15)
+@pytest.mark.flaky(max_runs=15)
 def test_input_and_print(qtconsole, qtbot):
     """
     Test that we print correctly mixed input and print statements.
@@ -260,7 +259,7 @@ while user_input != '':
     assert output in control.toPlainText()
 
 
-@flaky(max_runs=5)
+@pytest.mark.flaky(max_runs=5)
 @pytest.mark.skipif(os.name == 'nt', reason="no SIGTERM on Windows")
 def test_restart_after_kill(qtconsole, qtbot):
     """
@@ -370,6 +369,44 @@ class TestConsoleWidget(unittest.TestCase):
             self.assert_text_equal(cursor, expected_outputs[i])
             # clear all the text
             cursor.insertText('')
+
+    def test_print_carriage_return(self):
+        """ Test that overwriting the current line works as intended,
+            before and after the cursor prompt.
+        """
+        w = ConsoleWidget()
+
+        # Show a prompt
+        w._prompt = "prompt>"
+        w._prompt_sep = "\n"
+
+        w._show_prompt()
+        self.assert_text_equal(w._get_cursor(), '\u2029prompt>')
+
+        test_inputs = ['Hello\n', 'World\r',
+                       '*' * 10, '\r',
+                       '0', '1', '2', '3', '4',
+                       '5', '6', '7', '8', '9',
+                       '\r\n']
+
+        for text in test_inputs:
+            w._append_plain_text(text, before_prompt=True)
+            w._flush_pending_stream() # emulate text being flushed
+
+        self.assert_text_equal(w._get_cursor(),
+            "Hello\u20290123456789\u2029\u2029prompt>")
+
+        # Print after prompt
+        w._executing = True
+        test_inputs = ['\nF', 'o', 'o',
+                       '\r', 'Bar', '\n']
+
+        for text in test_inputs:
+            w._append_plain_text(text, before_prompt=False)
+            w._flush_pending_stream() # emulate text being flushed
+
+        self.assert_text_equal(w._get_cursor(),
+            "Hello\u20290123456789\u2029\u2029prompt>\u2029Bar\u2029")
 
     def test_link_handling(self):
         noButton = QtCore.Qt.NoButton

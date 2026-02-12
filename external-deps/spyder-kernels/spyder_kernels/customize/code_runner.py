@@ -12,14 +12,16 @@ Spyder magics related to code execution, debugging, profiling, etc.
 # Standard library imports
 import ast
 import bdb
-import builtins
 from contextlib import contextmanager
+import cProfile
+from functools import partial
 import io
 import logging
 import os
 import pdb
 import shlex
 import sys
+import tempfile
 import time
 
 # Third-party imports
@@ -29,23 +31,35 @@ from IPython.core.inputtransformer2 import (
     leading_empty_lines,
 )
 from IPython.core.magic import (
-    needs_local_scope,
-    magics_class,
-    Magics,
+    line_cell_magic,
     line_magic,
+    Magics,
+    magics_class,
+    needs_local_scope,
+    no_var_expand,
 )
 from IPython.core import magic_arguments
 
 # Local imports
-from spyder_kernels.comms.frontendcomm import frontend_request
+from spyder_kernels.comms.frontendcomm import CommError, frontend_request
 from spyder_kernels.customize.namespace_manager import NamespaceManager
 from spyder_kernels.customize.spyderpdb import SpyderPdb
 from spyder_kernels.customize.umr import UserModuleReloader
-from spyder_kernels.customize.utils import capture_last_Expr, canonic
+from spyder_kernels.customize.utils import (
+    capture_last_Expr, canonic, create_pathlist, exec_encapsulate_locals
+)
 
 
 # For logging
 logger = logging.getLogger(__name__)
+
+
+def profile_with_context(*args, **kwargs):
+    """Show a nice message when profiling is interrupted."""
+    try:
+        cProfile.runctx(*args, **kwargs)
+    except KeyboardInterrupt:
+        print("\nProfiling was interrupted")
 
 
 def runfile_arguments(func):
@@ -141,12 +155,14 @@ class SpyderCodeRunner(Magics):
     Functions and magics related to code execution, debugging, profiling, etc.
     """
     def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
         self.show_global_msg = True
         self.show_invalid_syntax_msg = True
         self.umr = UserModuleReloader(
-            namelist=os.environ.get("SPY_UMR_NAMELIST", None)
+            namelist=os.environ.get("SPY_UMR_NAMELIST", None),
+            shell=self.shell,
         )
-        super().__init__(*args, **kwargs)
 
     @runfile_arguments
     @needs_local_scope
@@ -192,6 +208,28 @@ class SpyderCodeRunner(Magics):
                 context_locals=local_ns,
             )
 
+    @runfile_arguments
+    @needs_local_scope
+    @line_magic
+    def profilefile(self, line, local_ns=None):
+        """Profile a file."""
+        args, local_ns = self._parse_runfile_argstring(
+            self.profilefile, line, local_ns
+        )
+
+        with self._profile_exec() as prof_exec:
+            self._exec_file(
+                filename=args.filename,
+                canonic_filename=args.canonic_filename,
+                wdir=args.wdir,
+                current_namespace=args.current_namespace,
+                args=args.args,
+                exec_fun=prof_exec,
+                post_mortem=args.post_mortem,
+                context_globals=args.namespace,
+                context_locals=local_ns,
+            )
+
     @runcell_arguments
     @needs_local_scope
     @line_magic
@@ -230,6 +268,35 @@ class SpyderCodeRunner(Magics):
                 context_locals=local_ns,
             )
 
+    @runcell_arguments
+    @needs_local_scope
+    @line_magic
+    def profilecell(self, line, local_ns=None):
+        """Profile a code cell."""
+        args = self._parse_runcell_argstring(self.profilecell, line)
+
+        with self._profile_exec() as prof_exec:
+            return self._exec_cell(
+                cell_id=args.cell_id,
+                filename=args.filename,
+                canonic_filename=args.canonic_filename,
+                exec_fun=prof_exec,
+                post_mortem=args.post_mortem,
+                context_globals=self.shell.user_ns,
+                context_locals=local_ns,
+            )
+
+    @no_var_expand
+    @needs_local_scope
+    @line_cell_magic
+    def profile(self, line, cell=None, local_ns=None):
+        """Profile the given line."""
+        if cell is not None:
+            line += "\n" + cell
+
+        with self._profile_exec() as prof_exec:
+            return prof_exec(line, self.shell.user_ns, local_ns)
+
     @contextmanager
     def _debugger_exec(self, filename, continue_if_has_breakpoints):
         """Get an exec function to use for debugging."""
@@ -245,11 +312,75 @@ class SpyderCodeRunner(Magics):
             debugger.set_remote_filename(filename)
             debugger.continue_if_has_breakpoints = continue_if_has_breakpoints
 
-            def debug_exec(code, glob, loc):
+            def debug_exec(code, glob=None, loc=None):
                 return sys.call_tracing(debugger.run, (code, glob, loc))
 
             # Enter recursive debugger
             yield debug_exec
+
+    @contextmanager
+    def _profile_exec(self):
+        """Get an exec function for profiling."""
+        # Request the frontend to adjust the UI when profiling is started
+        try:
+            frontend_request(blocking=False).start_profiling()
+        except CommError:
+            logger.debug(
+                "Could not request to start profiling to the frontend."
+            )
+
+        tmp_dir = None
+        if sys.platform.startswith('linux'):
+            # Do not use /tmp for temporary files
+            try:
+                from xdg.BaseDirectory import xdg_data_home
+                tmp_dir = os.path.join(xdg_data_home, "spyder")
+                os.makedirs(tmp_dir, exist_ok=True)
+            except Exception:
+                tmp_dir = None
+
+        with tempfile.TemporaryDirectory(dir=tmp_dir) as tempdir:
+            # Reset the tracing function in case we are debugging
+            trace_fun = sys.gettrace()
+            sys.settrace(None)
+
+            # Get a file to save the results
+            profile_filename = os.path.join(tempdir, "profile.prof")
+
+            try:
+                if self.shell.is_debugging():
+                    def prof_exec(code, glob=None, loc=None):
+                        """
+                        If we are debugging (tracing), call_tracing is
+                        necessary for profiling.
+                        """
+                        return sys.call_tracing(
+                            profile_with_context,
+                            (code, glob, loc, profile_filename),
+                        )
+
+                    yield prof_exec
+                else:
+                    yield partial(
+                        profile_with_context, filename=profile_filename
+                    )
+            finally:
+                # Reset tracing function
+                sys.settrace(trace_fun)
+
+                # Send result to frontend
+                if os.path.isfile(profile_filename):
+                    with open(profile_filename, "br") as f:
+                        profile_result = f.read()
+
+                    try:
+                        frontend_request(blocking=False).show_profile_file(
+                            profile_result, create_pathlist()
+                        )
+                    except CommError:
+                        logger.debug(
+                            "Could not send profile result to the frontend."
+                        )
 
     def _exec_file(
         self,
@@ -266,7 +397,7 @@ class SpyderCodeRunner(Magics):
         """
         Execute a file.
         """
-        if self.umr.enabled:
+        if self.umr.enabled and self.shell.special != "cython":
             self.umr.run()
         if args is not None and not isinstance(args, str):
             raise TypeError("expected a character buffer object")
@@ -281,6 +412,10 @@ class SpyderCodeRunner(Magics):
             )
             self.shell.showtraceback(exception_only=True)
             return
+
+        # We need to keep the original file name to use it when setting the
+        # working directory below.
+        original_filename = filename
 
         # Here the remote filename has been used. It must now be valid locally.
         filename = canonic_filename
@@ -307,9 +442,12 @@ class SpyderCodeRunner(Magics):
                     pass
 
             if wdir is not None:
+                # True means use file dir
                 if wdir is True:
-                    # True means use file dir
-                    wdir = os.path.dirname(filename)
+                    # We use the original file name to get the working
+                    # directory in order to preserve its case sensitivity.
+                    # Fixes spyder-ide/spyder#23835
+                    wdir = os.path.dirname(original_filename)
                 if os.path.isdir(wdir):
                     os.chdir(wdir)
 
@@ -324,7 +462,7 @@ class SpyderCodeRunner(Magics):
                     print("Working directory {} doesn't exist.\n".format(wdir))
 
             try:
-                if self.umr.has_cython:
+                if self.shell.special == "cython":
                     # Cython files
                     with io.open(filename, encoding="utf-8") as f:
                         self.shell.run_cell_magic("cython", "", f.read())
@@ -496,11 +634,12 @@ class SpyderCodeRunner(Magics):
 
             if capture_last_expression:
                 ast_code, capture_last_expression = capture_last_Expr(
-                    ast_code, "_spyder_out"
+                    ast_code, "_spyder_out", ns_globals
                 )
-                ns_globals["__spyder_builtins__"] = builtins
 
-            exec_fun(compile(ast_code, filename, "exec"), ns_globals, ns_locals)
+            exec_encapsulate_locals(
+                ast_code, ns_globals, ns_locals, exec_fun, filename
+            )
 
             if capture_last_expression:
                 out = ns_globals.pop("_spyder_out", None)

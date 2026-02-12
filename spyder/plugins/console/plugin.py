@@ -10,13 +10,14 @@ Internal Console Plugin.
 
 # Standard library imports
 import logging
+import sys
 
 # Third party imports
 from qtpy.QtCore import Signal, Slot
 from qtpy.QtGui import QIcon
 
 # Local imports
-from spyder.api.config.fonts import SpyderFontType
+from spyder.api.fonts import SpyderFontType
 from spyder.api.plugins import Plugins, SpyderDockablePlugin
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
@@ -37,7 +38,7 @@ class Console(SpyderDockablePlugin):
     """
     NAME = 'internal_console'
     WIDGET_CLASS = ConsoleWidget
-    OPTIONAL = [Plugins.MainMenu]
+    OPTIONAL = [Plugins.Editor, Plugins.MainMenu, Plugins.PythonpathManager]
     CONF_SECTION = NAME
     CONF_FILE = False
     TABIFY = [Plugins.IPythonConsole, Plugins.History]
@@ -117,6 +118,9 @@ class Console(SpyderDockablePlugin):
             )
             widget.handle_exception(error_data)
 
+        # Save initial sys.path
+        self._initial_sys_path = sys.path.copy()
+
     @on_plugin_available(plugin=Plugins.MainMenu)
     def on_main_menu_available(self):
         widget = self.get_widget()
@@ -135,6 +139,28 @@ class Console(SpyderDockablePlugin):
             ConsoleWidgetActions.Quit,
             menu_id=ApplicationMenus.File)
 
+    @on_plugin_available(plugin=Plugins.PythonpathManager)
+    def on_pythonpath_manager_available(self):
+        pythonpath_manager = self.get_plugin(Plugins.PythonpathManager)
+        pythonpath_manager.sig_pythonpath_changed.connect(self._update_syspath)
+
+    @on_plugin_teardown(plugin=Plugins.PythonpathManager)
+    def on_pythonpath_manager_teardown(self):
+        pythonpath_manager = self.get_plugin(Plugins.PythonpathManager)
+        pythonpath_manager.sig_pythonpath_changed.disconnect(
+            self._update_syspath
+        )
+
+    @on_plugin_available(plugin=Plugins.Editor)
+    def on_editor_available(self):
+        editor = self.get_plugin(Plugins.Editor)
+        self.sig_edit_goto_requested.connect(editor.load)
+
+    @on_plugin_teardown(plugin=Plugins.Editor)
+    def on_editor_teardown(self):
+        editor = self.get_plugin(Plugins.Editor)
+        self.sig_edit_goto_requested.disconnect(editor.load)
+
     def update_font(self):
         font = self.get_font(SpyderFontType.Monospace)
         self.get_widget().set_font(font)
@@ -152,8 +178,15 @@ class Console(SpyderDockablePlugin):
             self.toggle_view_action.setChecked(False)
             self.dockwidget.hide()
 
-    # --- API
-    # ------------------------------------------------------------------------
+        # Update internal sys.path
+        paths = self.get_conf(
+            "spyder_pythonpath", section="pythonpath_manager"
+        )
+        prioritize = self.get_conf("prioritize", section="pythonpath_manager")
+        self._update_syspath(paths, prioritize)
+
+    # ---- Public API
+    # -------------------------------------------------------------------------
     @Slot()
     def report_issue(self):
         """Report an issue with the SpyderErrorDialog."""
@@ -267,3 +300,21 @@ class Console(SpyderDockablePlugin):
         Add an object to the namespace dictionary of the internal console.
         """
         self.get_widget().set_namespace_item(name, value)
+
+    # ---- Private API
+    # -------------------------------------------------------------------------
+    def _update_syspath(self, new_path, prioritize):
+        """
+        Add paths handled by the Pythonpath manager plugin to Spyder's own
+        sys.path.
+
+        Notes
+        -----
+        * This is necessary to make inspection of local classes work in the
+          Variable Explorer.
+        * Fixes spyder-ide/spyder#15998
+        """
+        if prioritize:
+            sys.path[:] = new_path + self._initial_sys_path
+        else:
+            sys.path[:] = self._initial_sys_path + new_path

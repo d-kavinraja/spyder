@@ -17,12 +17,21 @@ import sys
 import site
 
 # Third-party imports
-from traitlets import DottedObjectName
+from IPython.core import release as ipython_release
+from packaging.version import parse as parse_version
+
+
+# Remove current directory from sys.path to prevent kernel crashes when people
+# name Python files or modules with the same name as standard library modules.
+# See spyder-ide/spyder#8007
+# Inject it back into sys.path after all imports in this module but
+# before the kernel is initialized
+while '' in sys.path:
+    sys.path.remove('')
 
 # Local imports
+from spyder_kernels.console.kernelapp import SpyderKernelApp
 from spyder_kernels.utils.misc import is_module_installed
-from spyder_kernels.utils.mpl import (
-    MPL_BACKENDS_FROM_SPYDER, INLINE_FIGURE_FORMATS)
 
 
 def import_spydercustomize():
@@ -30,13 +39,6 @@ def import_spydercustomize():
     here = osp.dirname(__file__)
     parent = osp.dirname(here)
     customize_dir = osp.join(parent, 'customize')
-
-    # Remove current directory from sys.path to prevent kernel
-    # crashes when people name Python files or modules with
-    # the same name as standard library modules.
-    # See spyder-ide/spyder#8007
-    while '' in sys.path:
-        sys.path.remove('')
 
     # Import our customizations
     site.addsitedir(customize_dir)
@@ -47,23 +49,6 @@ def import_spydercustomize():
         sys.path.remove(customize_dir)
     except ValueError:
         pass
-
-
-def sympy_config(mpl_backend):
-    """Sympy configuration"""
-    if mpl_backend is not None:
-        lines = """
-from sympy.interactive import init_session
-init_session()
-%matplotlib {0}
-""".format(mpl_backend)
-    else:
-        lines = """
-from sympy.interactive import init_session
-init_session()
-"""
-
-    return lines
 
 
 def kernel_config():
@@ -89,9 +74,6 @@ def kernel_config():
         # Don't load nor save history in our IPython consoles.
         spy_cfg.HistoryAccessor.enabled = False
 
-    # Until we implement Issue 1052
-    spy_cfg.InteractiveShell.xmode = 'Plain'
-
     # Jedi completer.
     jedi_o = os.environ.get('SPY_JEDI_O') == 'True'
     spy_cfg.IPCompleter.use_jedi = jedi_o
@@ -113,100 +95,8 @@ def kernel_config():
             "del sys; del pdb"
         )
 
-    # Run lines of code at startup
-    run_lines_o = os.environ.get('SPY_RUN_LINES_O')
-    if run_lines_o is not None:
-        spy_cfg.IPKernelApp.exec_lines += (
-            [x.strip() for x in run_lines_o.split(';')]
-        )
-
-    # Load %autoreload magic
-    spy_cfg.IPKernelApp.exec_lines.append(
-        "get_ipython().kernel._load_autoreload_magic()")
-
-    # Load wurlitzer extension
-    spy_cfg.IPKernelApp.exec_lines.append(
-        "get_ipython().kernel._load_wurlitzer()")
-
-    # Default inline backend configuration.
-    # This is useful to have when people doesn't
-    # use our config system to configure the
-    # inline backend but want to use
-    # '%matplotlib inline' at runtime
-    spy_cfg.InlineBackend.rc = {
-        # The typical default figure size is too large for inline use,
-        # so we shrink the figure size to 6x4, and tweak fonts to
-        # make that fit.
-        'figure.figsize': (6.0, 4.0),
-        # 72 dpi matches SVG/qtconsole.
-        # This only affects PNG export, as SVG has no dpi setting.
-        'figure.dpi': 72,
-        # 12pt labels get cutoff on 6x4 logplots, so use 10pt.
-        'font.size': 10,
-        # 10pt still needs a little more room on the xlabel
-        'figure.subplot.bottom': .125,
-        # Play nicely with any background color.
-        'figure.facecolor': 'white',
-        'figure.edgecolor': 'white'
-    }
-
-    # Pylab configuration
-    mpl_backend = None
     if is_module_installed('matplotlib'):
-        # Set Matplotlib backend with Spyder options
-        pylab_o = os.environ.get('SPY_PYLAB_O')
-        backend_o = os.environ.get('SPY_BACKEND_O')
-        if pylab_o == 'True' and backend_o is not None:
-            mpl_backend = MPL_BACKENDS_FROM_SPYDER[backend_o]
-            # Inline backend configuration
-            if mpl_backend == 'inline':
-                # Figure format
-                format_o = os.environ.get('SPY_FORMAT_O')
-                formats = INLINE_FIGURE_FORMATS
-                if format_o is not None:
-                    spy_cfg.InlineBackend.figure_format = formats[format_o]
-
-                # Resolution
-                resolution_o = os.environ.get('SPY_RESOLUTION_O')
-                if resolution_o is not None:
-                    spy_cfg.InlineBackend.rc['figure.dpi'] = float(
-                        resolution_o)
-
-                # Figure size
-                width_o = float(os.environ.get('SPY_WIDTH_O'))
-                height_o = float(os.environ.get('SPY_HEIGHT_O'))
-                if width_o is not None and height_o is not None:
-                    spy_cfg.InlineBackend.rc['figure.figsize'] = (width_o,
-                                                                  height_o)
-
-                # Print figure kwargs
-                bbox_inches_o = os.environ.get('SPY_BBOX_INCHES_O')
-                bbox_inches = 'tight' if bbox_inches_o == 'True' else None
-                spy_cfg.InlineBackend.print_figure_kwargs.update(
-                    {'bbox_inches': bbox_inches})
-        else:
-            # Set Matplotlib backend to inline for external kernels.
-            # Fixes issue 108
-            mpl_backend = 'inline'
-
-        # Automatically load Pylab and Numpy, or only set Matplotlib
-        # backend
-        autoload_pylab_o = os.environ.get('SPY_AUTOLOAD_PYLAB_O') == 'True'
-        command = "get_ipython().kernel._set_mpl_backend('{0}', {1})"
-        spy_cfg.IPKernelApp.exec_lines.append(
-            command.format(mpl_backend, autoload_pylab_o))
-
-    # Enable Cython magic
-    run_cython = os.environ.get('SPY_RUN_CYTHON') == 'True'
-    if run_cython and is_module_installed('Cython'):
-        spy_cfg.IPKernelApp.exec_lines.append('%reload_ext Cython')
-
-    # Run a file at startup
-    use_file_o = os.environ.get('SPY_USE_FILE_O')
-    run_file_o = os.environ.get('SPY_RUN_FILE_O')
-    if use_file_o == 'True' and run_file_o is not None:
-        if osp.exists(run_file_o):
-            spy_cfg.IPKernelApp.file_to_run = run_file_o
+        spy_cfg.IPKernelApp.matplotlib = "inline"
 
     # Autocall
     autocall_o = os.environ.get('SPY_AUTOCALL_O')
@@ -216,15 +106,13 @@ def kernel_config():
     # To handle the banner by ourselves
     spy_cfg.ZMQInteractiveShell.banner1 = ''
 
+    # To disable tips (for the moment) that are only available in IPython 9.0+
+    if parse_version(ipython_release.version) >= parse_version("9.0"):
+        spy_cfg.ZMQInteractiveShell.enable_tip = False
+
     # Greedy completer
     greedy_o = os.environ.get('SPY_GREEDY_O') == 'True'
     spy_cfg.IPCompleter.greedy = greedy_o
-
-    # Sympy loading
-    sympy_o = os.environ.get('SPY_SYMPY_O') == 'True'
-    if sympy_o and is_module_installed('sympy'):
-        lines = sympy_config(mpl_backend)
-        spy_cfg.IPKernelApp.exec_lines.append(lines)
 
     # Disable the new mechanism to capture and forward low-level output
     # in IPykernel 6. For that we have Wurlitzer.
@@ -271,58 +159,34 @@ def main():
     # Import our customizations into the kernel
     import_spydercustomize()
 
-    # Remove current directory from sys.path to prevent kernel
-    # crashes when people name Python files or modules with
-    # the same name as standard library modules.
-    # See spyder-ide/spyder#8007
-    while '' in sys.path:
-        sys.path.remove('')
+    # Create a kernelapp instance
+    kernelapp = SpyderKernelApp.instance()
 
-    # Main imports
-    from ipykernel.kernelapp import IPKernelApp
-    from spyder_kernels.console.kernel import SpyderKernel
-
-    class SpyderKernelApp(IPKernelApp):
-
-        outstream_class = DottedObjectName(
-            'spyder_kernels.console.outstream.TTYOutStream')
-
-        def init_pdb(self):
-            """
-            This method was added in IPykernel 5.3.1 and it replaces
-            the debugger used by the kernel with a new class
-            introduced in IPython 7.15 during kernel's initialization.
-            Therefore, it doesn't allow us to use our debugger.
-            """
-            pass
-
-        def close(self):
-            """Close the loopback socket."""
-            socket = self.kernel.loopback_socket
-            if socket and not socket.closed:
-                socket.close()
-            return super().close()
-
-    # Fire up the kernel instance.
-    kernel = SpyderKernelApp.instance()
-    kernel.kernel_class = SpyderKernel
+    # Set config
     try:
-        kernel.config = kernel_config()
-    except:
+        kernelapp.config = kernel_config()
+    except Exception:
         pass
-    kernel.initialize()
+
+    # Re-add current working directory path into sys.path after all of the
+    # import statements, but before initializing the kernel.
+    if '' not in sys.path:
+        sys.path.insert(0, '')
+
+    # Init app
+    kernelapp.initialize()
 
     # Set our own magics
-    kernel.shell.register_magic_function(varexp)
+    kernelapp.shell.register_magic_function(varexp)
 
     # Set Pdb class to be used by %debug and %pdb.
     # This makes IPython consoles to use the class defined in our
     # sitecustomize instead of their default one.
     import pdb
-    kernel.shell.InteractiveTB.debugger_cls = pdb.Pdb
+    kernelapp.shell.InteractiveTB.debugger_cls = pdb.Pdb
 
     # Start the (infinite) kernel event loop.
-    kernel.start()
+    kernelapp.start()
 
 
 if __name__ == '__main__':

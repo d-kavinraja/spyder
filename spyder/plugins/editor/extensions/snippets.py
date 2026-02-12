@@ -11,9 +11,10 @@ import copy
 import functools
 
 # Third party imports
-from qtpy.QtGui import QTextCursor, QColor
-from qtpy.QtCore import Qt, QMutex, QMutexLocker
 from diff_match_patch import diff_match_patch
+from qtpy.QtCore import QMutex, QMutexLocker, Qt
+from qtpy.QtGui import QTextCursor, QColor
+from superqt.utils import qdebounced
 
 try:
     from rtree import index
@@ -23,7 +24,6 @@ except Exception:
 
 # Local imports
 from spyder.plugins.editor.api.editorextension import EditorExtension
-from spyder.py3compat import to_text_string
 from spyder.utils.snippets.ast import build_snippet_ast, nodes, tokenize
 
 
@@ -89,7 +89,6 @@ class SnippetsExtension(EditorExtension):
         self.starting_position = None
         self.modification_lock = QMutex()
         self.event_lock = QMutex()
-        self.update_lock = QMutex()
         self.node_position = {}
         self.snippets_map = {}
         self.undo_stack = []
@@ -98,7 +97,7 @@ class SnippetsExtension(EditorExtension):
             self.index = index.Index()
 
     def on_state_changed(self, state):
-        """Connect/disconnect sig_key_pressed signal."""
+        """Connect/disconnect editor signals."""
         if state:
             self.editor.sig_key_pressed.connect(self._on_key_pressed)
             self.editor.sig_insert_completion.connect(self.insert_snippet)
@@ -199,7 +198,7 @@ class SnippetsExtension(EditorExtension):
 
         with QMutexLocker(self.event_lock):
             key = event.key()
-            text = to_text_string(event.text())
+            text = str(event.text())
 
             if self.is_snippet_active:
                 line, column = self.editor.get_cursor_line_column()
@@ -589,7 +588,8 @@ class SnippetsExtension(EditorExtension):
 
     @lock
     def remove_selection(self, selection_start, selection_end):
-        self._remove_selection(selection_start, selection_end)
+        if self.is_snippet_active:
+            self._remove_selection(selection_start, selection_end)
 
     def _remove_selection(self, selection_start, selection_end):
         start_node, _, _ = self._find_node_by_position(*selection_start)
@@ -712,8 +712,10 @@ class SnippetsExtension(EditorExtension):
             text_ids = set([id(token) for token in nearest_text.tokens])
             if node_id not in text_ids:
                 current_node = nearest_text.tokens[-1]
+
         return current_node, nearest_snippet, nearest_text
 
+    @qdebounced(timeout=20)
     def cursor_changed(self, line, col):
         if not rtree_available:
             return
@@ -722,14 +724,16 @@ class SnippetsExtension(EditorExtension):
             self.inserting_snippet = False
             return
 
-        node, nearest_snippet, _ = self._find_node_by_position(line, col)
-        if node is None:
-            ignore = self.editor.is_undoing or self.editor.is_redoing
-            if not ignore:
-                self.reset()
-        else:
-            if nearest_snippet is not None:
-                self.active_snippet = nearest_snippet.number
+        if self.is_snippet_active:
+            node, nearest_snippet, _ = self._find_node_by_position(line, col)
+
+            if node is None:
+                ignore = self.editor.is_undoing or self.editor.is_redoing
+                if not ignore:
+                    self.reset()
+            else:
+                if nearest_snippet is not None:
+                    self.active_snippet = nearest_snippet.number
 
     def reset(self, partial_reset=False):
         self.node_number = 0
@@ -838,6 +842,19 @@ class SnippetsExtension(EditorExtension):
 
         self.inserting_snippet = True
         self.editor.insert_text(ast.text(), will_insert_text=False)
+
+        # Put cursor in the middle of braces to improve UX.
+        # Fixes spyder-ide/spyder#21409.
+        if text.endswith(('()', '[]', '{}')):
+            cursor = QTextCursor(self.editor.textCursor())
+            cursor_1 = cursor
+            cursor_1.movePosition(
+                QTextCursor.PreviousCharacter,
+                QTextCursor.KeepAnchor,
+            )
+            new_position = cursor_1.selectionStart()
+            cursor.setPosition(new_position)
+            self.editor.setTextCursor(cursor)
 
         if not self.editor.code_snippets:
             return

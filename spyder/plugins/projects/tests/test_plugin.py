@@ -24,15 +24,12 @@ from flaky import flaky
 
 # Local imports
 from spyder.app.cli_options import get_options
-from spyder.config.base import running_in_ci
 from spyder.config.manager import CONF
-import spyder.plugins.base
 from spyder.plugins.preferences.tests.conftest import MainWindowMock
 from spyder.plugins.projects.api import BaseProjectType
 from spyder.plugins.projects.plugin import Projects
 from spyder.plugins.projects.widgets.main_widget import QMessageBox
 from spyder.plugins.projects.widgets.projectdialog import ProjectDialog
-from spyder.py3compat import to_text_string
 
 
 # =============================================================================
@@ -91,11 +88,8 @@ def projects(qtbot, mocker, request, tmpdir):
     # This can only be done at this point
     projects._main = main_window
 
-    # Patching necessary to test visible_if_project_open
-    projects.shortcut = None
-    mocker.patch.object(spyder.plugins.base.SpyderDockWidget,
-                        'install_tab_event_filter')
     yield projects
+
     projects.get_container().close()
     projects.on_close()
 
@@ -126,7 +120,7 @@ def create_projects(projects, mocker):
 def test_open_project(projects, tmpdir, test_directory):
     """Test that we can create a project in a given directory."""
     # Create the directory
-    path = to_text_string(tmpdir.mkdir(test_directory))
+    path = str(tmpdir.mkdir(test_directory))
 
     # Open project in path
     projects.open_project(path=path)
@@ -142,7 +136,7 @@ def test_open_project(projects, tmpdir, test_directory):
 def test_delete_project(projects, tmpdir, mocker, test_directory):
     """Test that we can delete a project."""
     # Create the directory
-    path = to_text_string(tmpdir.mkdir(test_directory))
+    path = str(tmpdir.mkdir(test_directory))
 
     # Open project in path
     projects.open_project(path=path)
@@ -162,7 +156,7 @@ def test_close_project_sets_visible_config(projects, tmpdir, value):
     visible_if_project_open is set to the correct value."""
     # Set config to opposite value so that we can check that it's set correctly
     projects.set_conf('visible_if_project_open', not value)
-    projects.open_project(path=to_text_string(tmpdir))
+    projects.open_project(path=str(tmpdir))
     if value:
         projects._show_main_widget()
     else:
@@ -181,7 +175,7 @@ def test_on_close_sets_visible_config(projects, tmpdir, value):
     # No project is open so config option should remain unchanged
     assert projects.get_conf('visible_if_project_open') == (not value)
 
-    projects.open_project(path=to_text_string(tmpdir))
+    projects.open_project(path=str(tmpdir))
     if value:
         projects._show_main_widget()
     else:
@@ -195,7 +189,7 @@ def test_open_project_uses_visible_config(projects, tmpdir, value):
     """Test that when a project is opened, the project explorer is only opened
     if the config option visible_if_project_open is set."""
     projects.set_conf('visible_if_project_open', value)
-    projects.open_project(path=to_text_string(tmpdir))
+    projects.open_project(path=str(tmpdir))
     assert projects.get_widget().isVisible() == value
 
 
@@ -205,7 +199,7 @@ def test_switch_to_plugin(projects, tmpdir, value):
     opened, regardless of the config option visible_if_project_open.
     Regression test for spyder-ide/spyder#12491."""
     projects.set_conf('visible_if_project_open', value)
-    projects.open_project(path=to_text_string(tmpdir))
+    projects.open_project(path=str(tmpdir))
     projects.switch_to_plugin()
     assert projects.get_widget().isVisible()
 
@@ -219,7 +213,7 @@ def test_set_get_project_filenames_when_closing_no_files(create_projects,
 
     Regression test for spyder-ide/spyder#10045.
     """
-    path = to_text_string(tmpdir.mkdir('project1'))
+    path = str(tmpdir.mkdir('project1'))
     # Create paths but no actual files
     opened_files = [os.path.join(path, file)
                     for file in ['file1', 'file2', 'file3']]
@@ -247,14 +241,14 @@ def test_set_get_project_filenames_when_closing(create_projects, tmpdir):
     """
     # Setup tmp dir and files
     dir_object = tmpdir.mkdir('project1')
-    path = to_text_string(dir_object)
+    path = str(dir_object)
 
     # Needed to actually create the files
     opened_files = []
     for file in ['file1', 'file2', 'file3']:
         file_object = dir_object.join(file)
         file_object.write(file)
-        opened_files.append(to_text_string(file_object))
+        opened_files.append(str(file_object))
 
     # Create the projects plugin.
     projects = create_projects(path, opened_files)
@@ -274,15 +268,15 @@ def test_set_get_project_filenames_when_switching(create_projects, tmpdir):
     Updated for spyder-ide/spyder#10045.
     """
     dir_object1 = tmpdir.mkdir('project1')
-    path1 = to_text_string(dir_object1)
-    path2 = to_text_string(tmpdir.mkdir('project2'))
+    path1 = str(dir_object1)
+    path2 = str(tmpdir.mkdir('project2'))
 
     # Needed to actually create the files
     opened_files = []
     for file in ['file1', 'file2', 'file3']:
         file_object = dir_object1.join(file)
         file_object.write(file)
-        opened_files.append(to_text_string(file_object))
+        opened_files.append(str(file_object))
 
     # Create the projects plugin.
     projects = create_projects(path1, opened_files)
@@ -306,9 +300,9 @@ def test_recent_projects_menu_action(projects, tmpdir):
     Regression test for spyder-ide/spyder#8450.
     """
     # Create the directories.
-    path0 = to_text_string(tmpdir.mkdir('project0'))
-    path1 = to_text_string(tmpdir.mkdir('project1'))
-    path2 = to_text_string(tmpdir.mkdir('project2'))
+    path0 = str(tmpdir.mkdir('project0'))
+    path1 = str(tmpdir.mkdir('project1'))
+    path2 = str(tmpdir.mkdir('project2'))
 
     # Open projects in path0, path1, and path2.
     projects.open_project(path=path0)
@@ -339,8 +333,8 @@ def test_project_explorer_tree_root(projects, tmpdir, qtbot):
     qtbot.addWidget(projects.get_widget())
     projects._show_main_widget()
 
-    ppath1 = to_text_string(tmpdir.mkdir(u'測試'))
-    ppath2 = to_text_string(tmpdir.mkdir(u'ïèô éàñ').mkdir(u'اختبار'))
+    ppath1 = str(tmpdir.mkdir(u'測試'))
+    ppath2 = str(tmpdir.mkdir(u'ïèô éàñ').mkdir(u'اختبار'))
     if os.name == 'nt':
         # For an explanation of why this part is necessary to make this test
         # pass for Python2 in Windows, see spyder-ide/spyder#8528.
@@ -368,8 +362,6 @@ def test_project_explorer_tree_root(projects, tmpdir, qtbot):
 
 
 @flaky(max_runs=5)
-@pytest.mark.skipif(sys.platform == 'darwin', reason="Fails on Mac")
-@pytest.mark.skipif(not running_in_ci(), reason="Hangs locally sometimes")
 def test_filesystem_notifications(qtbot, projects, tmpdir):
     """
     Test that filesystem notifications are emitted when creating,
@@ -377,18 +369,19 @@ def test_filesystem_notifications(qtbot, projects, tmpdir):
     """
     # Create a directory for the project and some files.
     project_root = tmpdir.mkdir('project0')
+    git_folder = project_root.mkdir('.git')
     folder0 = project_root.mkdir('folder0')
     folder1 = project_root.mkdir('folder1')
-    file0 = project_root.join('file0')
-    file1 = folder0.join('file1')
-    file2 = folder0.join('file2')
-    file3 = folder1.join('file3')
+    file0 = project_root.join('file0.txt')
+    file1 = folder0.join('file1.txt')
+    file2 = folder0.join('file2.txt')
+    file3 = folder1.join('file3.txt')
     file0.write('')
     file1.write('')
     file3.write('ab')
 
     # Open the project
-    projects.open_project(path=to_text_string(project_root))
+    projects.open_project(path=str(project_root))
 
     # Get a reference to the filesystem event handler
     fs_handler = projects.get_widget().watcher.event_handler
@@ -399,7 +392,7 @@ def test_filesystem_notifications(qtbot, projects, tmpdir):
         file2.write('')
 
     file_created, is_dir = blocker.args
-    assert file_created == to_text_string(file2)
+    assert file_created == str(file2)
     assert not is_dir
 
     # Test folder creation
@@ -408,57 +401,71 @@ def test_filesystem_notifications(qtbot, projects, tmpdir):
         folder2 = project_root.mkdir('folder2')
 
     folder_created, is_dir = blocker.args
-    assert folder_created == osp.join(to_text_string(project_root), 'folder2')
+    assert folder_created == osp.join(str(project_root), 'folder2')
 
     # Test file move/renaming
-    new_file = osp.join(to_text_string(folder0), 'new_file')
+    new_file = osp.join(str(folder0), 'new_file.txt')
     with qtbot.waitSignal(fs_handler.sig_file_moved,
                           timeout=3000) as blocker:
-        shutil.move(to_text_string(file1), new_file)
+        shutil.move(str(file1), new_file)
 
     original_file, file_moved, is_dir = blocker.args
-    assert original_file == to_text_string(file1)
+    assert original_file == str(file1)
     assert file_moved == new_file
     assert not is_dir
 
     # Test folder move/renaming
-    new_folder = osp.join(to_text_string(project_root), 'new_folder')
+    new_folder = osp.join(str(project_root), 'new_folder')
     with qtbot.waitSignal(fs_handler.sig_file_moved,
                           timeout=3000) as blocker:
-        shutil.move(to_text_string(folder2), new_folder)
+        shutil.move(str(folder2), new_folder)
 
     original_folder, folder_moved, is_dir = blocker.args
-    assert original_folder == to_text_string(folder2)
+    assert original_folder == str(folder2)
     assert folder_moved == new_folder
     assert is_dir
 
     # Test file deletion
     with qtbot.waitSignal(fs_handler.sig_file_deleted,
                           timeout=3000) as blocker:
-        os.remove(to_text_string(file0))
+        os.remove(str(file0))
 
     deleted_file, is_dir = blocker.args
-    assert deleted_file == to_text_string(file0)
+    assert deleted_file == str(file0)
     assert not is_dir
-    assert not osp.exists(to_text_string(file0))
+    assert not osp.exists(str(file0))
 
     # Test folder deletion
     with qtbot.waitSignal(fs_handler.sig_file_deleted,
                           timeout=3000) as blocker:
-        shutil.rmtree(to_text_string(folder0))
+        shutil.rmtree(str(folder0))
 
     deleted_folder, is_dir = blocker.args
-    assert to_text_string(folder0) in deleted_folder
+    assert str(folder0) in deleted_folder
 
-    # For some reason this fails in macOS
-    if not sys.platform == 'darwin':
-        # Test file/folder modification
-        with qtbot.waitSignal(fs_handler.sig_file_modified,
-                              timeout=3000) as blocker:
-            file3.write('abc')
+    # Test file/folder modification
+    with qtbot.waitSignal(fs_handler.sig_file_modified,
+                          timeout=3000) as blocker:
+        file3.write('abc')
 
-        modified_file, is_dir = blocker.args
-        assert modified_file in to_text_string(file3)
+    modified_file, is_dir = blocker.args
+    assert modified_file in str(file3)
+
+    # Test events in hidden folders are not emitted
+    with qtbot.assertNotEmitted(fs_handler.sig_file_created, wait=2000):
+        git_file = git_folder.join('git_file.txt')
+        git_file.write("Some data")
+
+    # Test events in pycache folders are not emitted
+    with qtbot.assertNotEmitted(fs_handler.sig_file_created, wait=2000):
+        pycache_folder = project_root.mkdir('__pycache__')
+        pycache_file = pycache_folder.join("foo.pyc")
+        pycache_file.write("")
+
+    # Test events for files with binary extensions are not emitted
+    with qtbot.assertNotEmitted(fs_handler.sig_file_created, wait=2000):
+        png_file = project_root.join("binary.png")
+        png_file.write("")
 
 
 def test_loaded_and_closed_signals(create_projects, tmpdir, mocker, qtbot):
@@ -467,8 +474,8 @@ def test_loaded_and_closed_signals(create_projects, tmpdir, mocker, qtbot):
     projects.
     """
     dir_object1 = tmpdir.mkdir('project1')
-    path1 = to_text_string(dir_object1)
-    path2 = to_text_string(tmpdir.mkdir('project2'))
+    path1 = str(dir_object1)
+    path2 = str(tmpdir.mkdir('project2'))
 
     mocker.patch.object(ProjectDialog, "exec_", return_value=True)
 
@@ -477,7 +484,7 @@ def test_loaded_and_closed_signals(create_projects, tmpdir, mocker, qtbot):
     for file in ['file1', 'file2', 'file3']:
         file_object = dir_object1.join(file)
         file_object.write(file)
-        opened_files.append(to_text_string(file_object))
+        opened_files.append(str(file_object))
 
     # Create the projects plugin.
     projects = create_projects(path1, opened_files)

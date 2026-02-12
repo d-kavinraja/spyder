@@ -15,14 +15,15 @@ import sys
 
 # Third party imports
 from qtpy.compat import getopenfilename
-from qtpy.QtCore import QRegExp, QSize, Qt, Signal, Slot
-from qtpy.QtGui import QCursor, QRegExpValidator
+from qtpy.QtCore import QRegularExpression, QSize, Qt, Signal, Slot
+from qtpy.QtGui import QCursor, QRegularExpressionValidator
 from qtpy.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
                             QHBoxLayout, QLabel, QLineEdit,
                             QListWidget, QListWidgetItem, QPushButton,
                             QVBoxLayout, QWidget)
 # Local imports
-from spyder.config.base import _
+from spyder.api.translations import _
+from spyder.api.widgets.dialogs import SpyderDialogButtonBox
 from spyder.utils.encoding import is_text_file
 from spyder.utils.programs import (get_application_icon,
                                    get_installed_applications,
@@ -34,15 +35,16 @@ class InputTextDialog(QDialog):
 
     def __init__(self, parent=None, title='', label=''):
         """Input text dialog with regex validation."""
-        super(InputTextDialog, self).__init__(parent=parent)
+        super().__init__(parent=parent)
         self._reg = None
         self._regex = None
 
         # Widgets
         self.label = QLabel()
         self.lineedit = QLineEdit()
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok
-                                           | QDialogButtonBox.Cancel)
+        self.button_box = SpyderDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
         self.button_ok = self.button_box.button(QDialogButtonBox.Ok)
         self.button_cancel = self.button_box.button(QDialogButtonBox.Cancel)
 
@@ -83,7 +85,7 @@ class InputTextDialog(QDialog):
         """Set the regular expression to validate content."""
         self._regex = regex
         self._reg = re.compile(regex, re.IGNORECASE)
-        validator = QRegExpValidator(QRegExp(regex))
+        validator = QRegularExpressionValidator(QRegularExpression(regex))
         self.lineedit.setValidator(validator)
 
     def text(self):
@@ -101,7 +103,7 @@ class ApplicationsDialog(QDialog):
 
     def __init__(self, parent=None):
         """Dialog for selection of installed system/user applications."""
-        super(ApplicationsDialog, self).__init__(parent=parent)
+        super().__init__(parent=parent)
 
         # Widgets
         self.label = QLabel()
@@ -109,8 +111,9 @@ class ApplicationsDialog(QDialog):
         self.edit_filter = QLineEdit()
         self.list = QListWidget()
         self.button_browse = QPushButton(_('Browse...'))
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok
-                                           | QDialogButtonBox.Cancel)
+        self.button_box = SpyderDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
         self.button_ok = self.button_box.button(QDialogButtonBox.Ok)
         self.button_cancel = self.button_box.button(QDialogButtonBox.Cancel)
 
@@ -282,7 +285,7 @@ class FileAssociationsWidget(QWidget):
 
     def __init__(self, parent=None):
         """Widget to add applications association to file extensions."""
-        super(FileAssociationsWidget, self).__init__(parent=parent)
+        super().__init__(parent=parent)
 
         # Variables
         self._data = {}
@@ -335,8 +338,10 @@ class FileAssociationsWidget(QWidget):
         layout.addWidget(self.label)
         layout.addWidget(self.label_extensions)
         layout.addLayout(layout_extensions)
+        layout.addSpacing(9)
         layout.addWidget(self.label_applications)
         layout.addLayout(layout_applications)
+        layout.addSpacing(9)
 
         self.setLayout(layout)
 
@@ -411,7 +416,7 @@ class FileAssociationsWidget(QWidget):
     def _update_extensions(self):
         """Update extensions list."""
         self.list_extensions.clear()
-        for extension, _ in sorted(self._data.items()):
+        for extension, __ in sorted(self._data.items()):
             self._add_association(extension)
 
         # Select first item

@@ -7,10 +7,9 @@ import sys
 import pytest
 
 from pylsp import uris
-from pylsp.plugins.symbols import pylsp_document_symbols
 from pylsp.lsp import SymbolKind
+from pylsp.plugins.symbols import pylsp_document_symbols
 from pylsp.workspace import Document
-
 
 PY2 = sys.version[0] == "2"
 LINUX = sys.platform.startswith("linux")
@@ -28,6 +27,17 @@ class B:
 def main(x):
     y = 2 * x
     return y
+
+"""
+
+DOC_IMPORTS = """from . import something
+from ..module import something
+from module import (a, b)
+
+def main():
+    # import ignored
+    print("from module import x")  # string with import
+    return something
 
 """
 
@@ -74,13 +84,31 @@ def test_symbols(config, workspace):
     assert sym("main")["location"]["range"]["end"] == {"line": 12, "character": 0}
 
 
-def test_symbols_all_scopes(config, workspace):
+def test_symbols_complex_imports(config, workspace):
+    doc = Document(DOC_URI, workspace, DOC_IMPORTS)
+    config.update({"plugins": {"jedi_symbols": {"all_scopes": False}}})
+    symbols = pylsp_document_symbols(config, doc)
+
+    import_symbols = [s for s in symbols if s["kind"] == SymbolKind.Module]
+
+    assert len(import_symbols) == 4
+
+    names = [s["name"] for s in import_symbols]
+    assert "something" in names
+    assert "a" in names or "b" in names
+
+    assert any(
+        s["name"] == "main" and s["kind"] == SymbolKind.Function for s in symbols
+    )
+
+
+def test_symbols_all_scopes(config, workspace) -> None:
     doc = Document(DOC_URI, workspace, DOC)
     symbols = pylsp_document_symbols(config, doc)
     helper_check_symbols_all_scope(symbols)
 
 
-def test_symbols_non_existing_file(config, workspace, tmpdir):
+def test_symbols_non_existing_file(config, workspace, tmpdir) -> None:
     path = tmpdir.join("foo.py")
     # Check pre-condition: file must not exist
     assert not path.check(exists=1)
@@ -93,7 +121,7 @@ def test_symbols_non_existing_file(config, workspace, tmpdir):
 @pytest.mark.skipif(
     PY2 or not LINUX or not CI, reason="tested on linux and python 3 only"
 )
-def test_symbols_all_scopes_with_jedi_environment(workspace):
+def test_symbols_all_scopes_with_jedi_environment(workspace) -> None:
     doc = Document(DOC_URI, workspace, DOC)
 
     # Update config extra environment

@@ -1,18 +1,21 @@
 # Copyright 2021- Python Language Server Contributors.
 
-import os
 import time
-from unittest.mock import patch, call
-
-from test.fixtures import CALL_TIMEOUT_IN_SECONDS
+from unittest.mock import call, patch
 
 import pytest
 
 from pylsp import IS_WIN
 from pylsp.lsp import NotebookCellKind
+from pylsp.workspace import Notebook
+from test.test_utils import (
+    CALL_TIMEOUT_IN_SECONDS,
+    send_initialize_request,
+    send_notebook_did_open,
+)
 
 
-def wait_for_condition(condition, timeout=CALL_TIMEOUT_IN_SECONDS):
+def wait_for_condition(condition, timeout=CALL_TIMEOUT_IN_SECONDS) -> None:
     """Wait for a condition to be true, or timeout."""
     start_time = time.time()
     while not condition():
@@ -22,33 +25,20 @@ def wait_for_condition(condition, timeout=CALL_TIMEOUT_IN_SECONDS):
 
 
 @pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
-def test_initialize(client_server_pair):
+def test_initialize(client_server_pair) -> None:
     client, server = client_server_pair
-    response = client._endpoint.request(
-        "initialize",
-        {
-            "processId": 1234,
-            "rootPath": os.path.dirname(__file__),
-            "initializationOptions": {},
-        },
-    ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
+    response = send_initialize_request(client)
     assert server.workspace is not None
-    assert "notebookDocumentSync" in response["capabilities"].keys()
+    selector = response["capabilities"]["notebookDocumentSync"]["notebookSelector"]
+    assert isinstance(selector, list)
 
 
 @pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
-def test_notebook_document__did_open(
-    client_server_pair,
-):
+def test_workspace_did_change_configuration(client_server_pair) -> None:
+    """Test that we can update a workspace config w/o error when a notebook is open."""
     client, server = client_server_pair
-    client._endpoint.request(
-        "initialize",
-        {
-            "processId": 1234,
-            "rootPath": os.path.dirname(__file__),
-            "initializationOptions": {},
-        },
-    ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
+    send_initialize_request(client)
+    assert server.workspace is not None
 
     with patch.object(server._endpoint, "notify") as mock_notify:
         client._endpoint.notify(
@@ -62,53 +52,45 @@ def test_notebook_document__did_open(
                             "kind": NotebookCellKind.Code,
                             "document": "cell_1_uri",
                         },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_2_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_3_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_4_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_5_uri",
-                        },
                     ],
                 },
-                # Test as many edge cases as possible for the diagnostics message
                 "cellTextDocuments": [
                     {
                         "uri": "cell_1_uri",
                         "languageId": "python",
                         "text": "",
                     },
-                    {
-                        "uri": "cell_2_uri",
-                        "languageId": "python",
-                        "text": "\n",
-                    },
-                    {
-                        "uri": "cell_3_uri",
-                        "languageId": "python",
-                        "text": "\nimport sys\n\nabc\n\n",
-                    },
-                    {
-                        "uri": "cell_4_uri",
-                        "languageId": "python",
-                        "text": "x",
-                    },
-                    {
-                        "uri": "cell_5_uri",
-                        "languageId": "python",
-                        "text": "y\n",
-                    },
                 ],
             },
+        )
+        wait_for_condition(lambda: mock_notify.call_count >= 1)
+    assert isinstance(server.workspace.get_document("notebook_uri"), Notebook)
+    assert len(server.workspace.documents) == 2
+
+    server.workspace.update_config(
+        {"pylsp": {"plugins": {"flake8": {"enabled": True}}}}
+    )
+
+    assert server.config.plugin_settings("flake8").get("enabled") is True
+    assert (
+        server.workspace.get_document("cell_1_uri")
+        ._config.plugin_settings("flake8")
+        .get("enabled")
+        is True
+    )
+
+
+@pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
+def test_notebook_document__did_open(
+    client_server_pair,
+) -> None:
+    client, server = client_server_pair
+    send_initialize_request(client)
+
+    with patch.object(server._endpoint, "notify") as mock_notify:
+        # Test as many edge cases as possible for the diagnostics messages
+        send_notebook_did_open(
+            client, ["", "\n", "\nimport sys\n\nabc\n\n", "x", "y\n"]
         )
         wait_for_condition(lambda: mock_notify.call_count >= 5)
         expected_call_args = [
@@ -203,50 +185,13 @@ def test_notebook_document__did_open(
 @pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
 def test_notebook_document__did_change(
     client_server_pair,
-):
+) -> None:
     client, server = client_server_pair
-    client._endpoint.request(
-        "initialize",
-        {
-            "processId": 1234,
-            "rootPath": os.path.dirname(__file__),
-            "initializationOptions": {},
-        },
-    ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
+    send_initialize_request(client)
 
     # Open notebook
     with patch.object(server._endpoint, "notify") as mock_notify:
-        client._endpoint.notify(
-            "notebookDocument/didOpen",
-            {
-                "notebookDocument": {
-                    "uri": "notebook_uri",
-                    "notebookType": "jupyter-notebook",
-                    "cells": [
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_1_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_2_uri",
-                        },
-                    ],
-                },
-                "cellTextDocuments": [
-                    {
-                        "uri": "cell_1_uri",
-                        "languageId": "python",
-                        "text": "import sys",
-                    },
-                    {
-                        "uri": "cell_2_uri",
-                        "languageId": "python",
-                        "text": "",
-                    },
-                ],
-            },
-        )
+        send_notebook_did_open(client, ["import sys", ""])
         wait_for_condition(lambda: mock_notify.call_count >= 2)
         assert len(server.workspace.documents) == 3
         for uri in ["cell_1_uri", "cell_2_uri", "notebook_uri"]:
@@ -475,50 +420,13 @@ def test_notebook_document__did_change(
 @pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
 def test_notebook__did_close(
     client_server_pair,
-):
+) -> None:
     client, server = client_server_pair
-    client._endpoint.request(
-        "initialize",
-        {
-            "processId": 1234,
-            "rootPath": os.path.dirname(__file__),
-            "initializationOptions": {},
-        },
-    ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
+    send_initialize_request(client)
 
     # Open notebook
     with patch.object(server._endpoint, "notify") as mock_notify:
-        client._endpoint.notify(
-            "notebookDocument/didOpen",
-            {
-                "notebookDocument": {
-                    "uri": "notebook_uri",
-                    "notebookType": "jupyter-notebook",
-                    "cells": [
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_1_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_2_uri",
-                        },
-                    ],
-                },
-                "cellTextDocuments": [
-                    {
-                        "uri": "cell_1_uri",
-                        "languageId": "python",
-                        "text": "import sys",
-                    },
-                    {
-                        "uri": "cell_2_uri",
-                        "languageId": "python",
-                        "text": "",
-                    },
-                ],
-            },
-        )
+        send_notebook_did_open(client, ["import sys", ""])
         wait_for_condition(lambda: mock_notify.call_count >= 2)
         assert len(server.workspace.documents) == 3
         for uri in ["cell_1_uri", "cell_2_uri", "notebook_uri"]:
@@ -547,50 +455,13 @@ def test_notebook__did_close(
 
 
 @pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
-def test_notebook_definition(client_server_pair):
+def test_notebook_definition(client_server_pair) -> None:
     client, server = client_server_pair
-    client._endpoint.request(
-        "initialize",
-        {
-            "processId": 1234,
-            "rootPath": os.path.dirname(__file__),
-            "initializationOptions": {},
-        },
-    ).result(timeout=CALL_TIMEOUT_IN_SECONDS)
+    send_initialize_request(client)
 
     # Open notebook
     with patch.object(server._endpoint, "notify") as mock_notify:
-        client._endpoint.notify(
-            "notebookDocument/didOpen",
-            {
-                "notebookDocument": {
-                    "uri": "notebook_uri",
-                    "notebookType": "jupyter-notebook",
-                    "cells": [
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_1_uri",
-                        },
-                        {
-                            "kind": NotebookCellKind.Code,
-                            "document": "cell_2_uri",
-                        },
-                    ],
-                },
-                "cellTextDocuments": [
-                    {
-                        "uri": "cell_1_uri",
-                        "languageId": "python",
-                        "text": "y=2\nx=1",
-                    },
-                    {
-                        "uri": "cell_2_uri",
-                        "languageId": "python",
-                        "text": "x",
-                    },
-                ],
-            },
-        )
+        send_notebook_did_open(client, ["y=2\nx=1", "x"])
         # wait for expected diagnostics messages
         wait_for_condition(lambda: mock_notify.call_count >= 2)
         assert len(server.workspace.documents) == 3
@@ -616,3 +487,114 @@ def test_notebook_definition(client_server_pair):
             },
         }
     ]
+
+
+@pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
+def test_notebook_completion(client_server_pair) -> None:
+    """
+    Tests that completions work across cell boundaries for notebook document support
+    """
+    client, server = client_server_pair
+    send_initialize_request(client)
+
+    # Open notebook
+    with patch.object(server._endpoint, "notify") as mock_notify:
+        send_notebook_did_open(
+            client, ["answer_to_life_universe_everything = 42", "answer_"]
+        )
+        # wait for expected diagnostics messages
+        wait_for_condition(lambda: mock_notify.call_count >= 2)
+        assert len(server.workspace.documents) == 3
+        for uri in ["cell_1_uri", "cell_2_uri", "notebook_uri"]:
+            assert uri in server.workspace.documents
+
+    future = client._endpoint.request(
+        "textDocument/completion",
+        {
+            "textDocument": {
+                "uri": "cell_2_uri",
+            },
+            "position": {"line": 0, "character": 7},
+        },
+    )
+    result = future.result(CALL_TIMEOUT_IN_SECONDS)
+    assert result == {
+        "isIncomplete": False,
+        "items": [
+            {
+                "data": {"doc_uri": "cell_2_uri"},
+                "insertText": "answer_to_life_universe_everything",
+                "kind": 6,
+                "label": "answer_to_life_universe_everything",
+                "sortText": "aanswer_to_life_universe_everything",
+            },
+        ],
+    }
+
+
+@pytest.mark.skipif(IS_WIN, reason="Flaky on Windows")
+def test_notebook_completion_resolve(client_server_pair) -> None:
+    """
+    Tests that completion item resolve works correctly
+    """
+    client, server = client_server_pair
+    send_initialize_request(client)
+
+    # Open notebook
+    with patch.object(server._endpoint, "notify") as mock_notify:
+        send_notebook_did_open(
+            client,
+            [
+                "def answer():\n\t'''Returns an important number.'''\n\treturn 42",
+                "ans",
+            ],
+        )
+        # wait for expected diagnostics messages
+        wait_for_condition(lambda: mock_notify.call_count >= 2)
+        assert len(server.workspace.documents) == 3
+        for uri in ["cell_1_uri", "cell_2_uri", "notebook_uri"]:
+            assert uri in server.workspace.documents
+
+    future = client._endpoint.request(
+        "textDocument/completion",
+        {
+            "textDocument": {
+                "uri": "cell_2_uri",
+            },
+            "position": {"line": 0, "character": 3},
+        },
+    )
+    result = future.result(CALL_TIMEOUT_IN_SECONDS)
+    assert result == {
+        "isIncomplete": False,
+        "items": [
+            {
+                "data": {"doc_uri": "cell_2_uri"},
+                "insertText": "answer",
+                "kind": 3,
+                "label": "answer()",
+                "sortText": "aanswer",
+            },
+        ],
+    }
+
+    future = client._endpoint.request(
+        "completionItem/resolve",
+        {
+            "data": {"doc_uri": "cell_2_uri"},
+            "label": "answer()",
+        },
+    )
+    result = future.result(CALL_TIMEOUT_IN_SECONDS)
+    del result["detail"]  # The value of this is unpredictable.
+    assert result == {
+        "data": {"doc_uri": "cell_2_uri"},
+        "insertText": "answer",
+        "kind": 3,
+        "label": "answer()",
+        "sortText": "aanswer",
+        "documentation": {
+            "kind": "markdown",
+            "value": "```python\nanswer()\n```\n\n\nReturns an important number.",
+        },
+    }

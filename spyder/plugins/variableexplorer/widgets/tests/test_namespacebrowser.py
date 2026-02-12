@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 # Third party imports
 from flaky import flaky
+from pandas import DataFrame
 import pytest
 from qtpy.QtCore import Qt, QPoint, QModelIndex
 
@@ -81,7 +82,7 @@ def test_sort_by_column(namespacebrowser, qtbot):
     # Check header is clickable
     assert header.sectionsClickable()
 
-    model = browser.editor.model
+    model = browser.editor.model()
 
     # Base check of the model
     assert model.rowCount() == 2
@@ -133,7 +134,7 @@ def test_keys_sorted_and_sort_with_large_rows(namespacebrowser, qtbot):
 
     # Assert we loaded the expected amount of data and that we can fetch
     # more.
-    model = browser.editor.model
+    model = browser.editor.model()
     assert model.rowCount() == ROWS_TO_LOAD
     assert model.canFetchMore(QModelIndex())
 
@@ -170,7 +171,7 @@ def test_filtering_with_large_rows(namespacebrowser, qtbot):
 
     # Assert we loaded the expected amount of data and that we can fetch
     # more data.
-    model = browser.editor.model
+    model = browser.editor.model()
     assert model.rowCount() == ROWS_TO_LOAD
     assert model.canFetchMore(QModelIndex())
     assert data(model, 49, 0) == 'e49'
@@ -206,29 +207,55 @@ def test_filtering_with_large_rows(namespacebrowser, qtbot):
 def test_namespacebrowser_plot_with_mute_inline_plotting_true(
         namespacebrowser, qtbot):
     """
-    Test that plotting a list from the namespace browser sends a signal
+    Test that plotting from the namespace browser sends a signal
     with the plot if `mute_inline_plotting` is set to `True`.
     """
     namespacebrowser.set_conf('mute_inline_plotting', True, section='plots')
     namespacebrowser.plots_plugin_enabled = True
-    my_list = [4, 2]
     mock_figure = Mock()
-    mock_axis = Mock()
+    mock_plot_function = Mock()
     mock_png = b'fake png'
 
-    with patch('spyder.pyplot.subplots',
-               return_value=(mock_figure, mock_axis)), \
+    with patch('spyder.pyplot.figure', return_value=mock_figure), \
          patch('IPython.core.pylabtools.print_figure',
                return_value=mock_png) as mock_print_figure, \
          qtbot.waitSignal(namespacebrowser.sig_show_figure_requested) \
              as blocker:
-        namespacebrowser.plot(my_list, 'plot')
+        namespacebrowser.plot(mock_plot_function)
 
-    mock_axis.plot.assert_called_once_with(my_list)
+    mock_plot_function.assert_called_once_with(mock_figure)
     mock_print_figure.assert_called_once_with(
-        mock_figure, fmt='png', bbox_inches='tight', dpi=72)
+        mock_figure, fmt='png', bbox_inches='tight', dpi=144)
     expected_args = [mock_png, 'image/png', namespacebrowser.shellwidget]
     assert blocker.args == expected_args
+
+
+def test_namespacebrowser_plot_options(namespacebrowser):
+    """
+    Test that font.size and figure.subplot.bottom in matplotlib.rcParams are
+    set to the values from the Spyder preferences when plotting.
+    """
+    def plot_function(figure):
+        from matplotlib import rcParams
+        assert rcParams['font.size'] == 20.5
+        assert rcParams['figure.subplot.bottom'] == 0.314
+
+    namespacebrowser.set_conf('mute_inline_plotting', True, section='plots')
+    namespacebrowser.plots_plugin_enabled = True
+    namespacebrowser.set_conf(
+        'pylab/inline/fontsize', 20.5, section='ipython_console'
+    )
+    namespacebrowser.set_conf(
+        'pylab/inline/bottom', 0.314, section='ipython_console'
+    )
+
+    mock_figure = Mock()
+    mock_png = b'fake png'
+
+    with patch('spyder.pyplot.figure', return_value=mock_figure), \
+         patch('IPython.core.pylabtools.print_figure',
+               return_value=mock_png):
+        namespacebrowser.plot(plot_function)
 
 
 def test_namespacebrowser_plot_with_mute_inline_plotting_false(namespacebrowser):
@@ -237,16 +264,49 @@ def test_namespacebrowser_plot_with_mute_inline_plotting_false(namespacebrowser)
     `mute_inline_plotting` is set to `False`.
     """
     namespacebrowser.set_conf('mute_inline_plotting', False, section='plots')
-    my_list = [4, 2]
+    mock_plot_function = Mock()
 
-    with patch('spyder.pyplot.figure') as mock_figure, \
-         patch('spyder.pyplot.plot') as mock_plot, \
-         patch('spyder.pyplot.show') as mock_show:
-        namespacebrowser.plot(my_list, 'plot')
+    with patch('spyder.pyplot.figure') as mock_figure:
+        namespacebrowser.plot(mock_plot_function)
 
     mock_figure.assert_called_once_with()
-    mock_plot.assert_called_once_with(my_list)
-    mock_show.assert_called_once_with()
+    mock_plot_function.assert_called_once_with(mock_figure())
+    mock_figure().show.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    'type_name, readonly',
+    [('Polars DataFrame', True), ('DataFrame', False)]
+)
+def test_dataframeeditor_readonly(namespacebrowser, type_name, readonly):
+    """
+    Test that opening a dataframe editor makes the editor read-only for Polarrs
+    dataframes but not for Pandas dataframes.
+    """
+    browser = namespacebrowser
+    browser.set_data(
+        {
+            'df': {
+                'type': type_name,
+                'size': [1, 1],
+                'view': 'Column names: label',
+                'python_type': 'dataframe',
+                'numpy_type': 'Unknown',
+            }
+        }
+    )
+    editor = browser.editor
+    value = DataFrame({'label': [42]})
+    name_to_patch = (
+        'spyder.plugins.variableexplorer.widgets.dataframeeditor'
+        '.DataFrameEditor'
+    )
+    with patch(name_to_patch) as MockDataFrameEditor, patch.object(
+        editor, 'get_value', return_value=value
+    ):
+        editor.delegate.createEditor(None, None, editor.model().index(0, 3))
+
+    assert MockDataFrameEditor.call_args.kwargs['readonly'] == readonly
 
 
 if __name__ == "__main__":

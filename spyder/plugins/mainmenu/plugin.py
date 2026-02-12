@@ -10,21 +10,24 @@ Main menu Plugin.
 
 # Standard library imports
 from collections import OrderedDict
+import os
 import sys
 from typing import Dict, List, Tuple, Optional, Union
 
-# Third party imports
-from qtpy.QtGui import QKeySequence
-
 # Local imports
-from spyder.api.config.fonts import SpyderFontType
 from spyder.api.exceptions import SpyderAPIError
+from spyder.api.fonts import SpyderFontType
 from spyder.api.plugin_registration.registry import PLUGIN_REGISTRY
 from spyder.api.plugins import SpyderPluginV2, SpyderDockablePlugin, Plugins
 from spyder.api.translations import _
 from spyder.api.widgets.menus import SpyderMenu
-from spyder.plugins.mainmenu.api import ApplicationMenu, ApplicationMenus
-from spyder.utils.qthelpers import set_menu_icons, SpyderAction
+from spyder.api.widgets.mixins import SpyderMenuMixin
+from spyder.plugins.mainmenu.api import (
+    ApplicationMenu,
+    ApplicationMenus,
+    MENUBAR_STYLESHEET,
+)
+from spyder.utils.qthelpers import SpyderAction
 
 
 # Extended typing definitions
@@ -34,7 +37,7 @@ ItemSectionBefore = Tuple[
 ItemQueue = Dict[str, List[ItemSectionBefore]]
 
 
-class MainMenu(SpyderPluginV2):
+class MainMenu(SpyderPluginV2, SpyderMenuMixin):
     NAME = 'mainmenu'
     CONF_SECTION = NAME
     CONF_FILE = False
@@ -60,120 +63,62 @@ class MainMenu(SpyderPluginV2):
         # menu
         self._ITEM_QUEUE = {}  # type: ItemQueue
 
-        # Set main menu font. This is only necessary on Windows and Linux
+        # Set style. This is only necessary on Windows and Linux
         if not sys.platform == 'darwin':
             app_font = self.get_font(font_type=SpyderFontType.Interface)
             self.main.menuBar().setFont(app_font)
+            self.main.menuBar().setStyleSheet(str(MENUBAR_STYLESHEET))
 
         # Create Application menus using plugin public API
-        # FIXME: Migrated menus need to have 'dynamic=True' (default value) to
-        # work on Mac. Remove the 'dynamic' kwarg when migrating a menu!
         create_app_menu = self.create_application_menu
         create_app_menu(ApplicationMenus.File, _("&File"))
         create_app_menu(ApplicationMenus.Edit, _("&Edit"))
         create_app_menu(ApplicationMenus.Search, _("&Search"))
         create_app_menu(ApplicationMenus.Source, _("Sour&ce"))
-        create_app_menu(ApplicationMenus.Run, _("&Run"), dynamic=False)
-        create_app_menu(ApplicationMenus.Debug, _("&Debug"), dynamic=False)
+        create_app_menu(ApplicationMenus.Run, _("&Run"))
+        create_app_menu(ApplicationMenus.Debug, _("&Debug"))
         if self.is_plugin_enabled(Plugins.IPythonConsole):
             create_app_menu(ApplicationMenus.Consoles, _("C&onsoles"))
         if self.is_plugin_enabled(Plugins.Projects):
-            create_app_menu(ApplicationMenus.Projects, _("&Projects"))
+            create_app_menu(
+                ApplicationMenus.Projects,
+                _("&Projects"),
+                min_width=150 if os.name == "nt" else 170
+            )
         create_app_menu(ApplicationMenus.Tools, _("&Tools"))
-        create_app_menu(ApplicationMenus.View, _("&View"))
+        create_app_menu(ApplicationMenus.Window, _("&Window"))
         create_app_menu(ApplicationMenus.Help, _("&Help"))
 
     def on_mainwindow_visible(self):
-        # Pre-render menus so actions with menu roles (like "About Spyder"
-        # and "Preferences") are located in the right place in Mac's menu
-        # bar.
+        # Pre-render menus so actions with menu roles (like "About Spyder" and
+        # "Preferences") are located in the right place in Mac's menu bar.
         # Fixes spyder-ide/spyder#14917
         # This also registers shortcuts for actions that are only in menus.
         # Fixes spyder-ide/spyder#16061
         for menu in self._APPLICATION_MENUS.values():
-            menu._render()
+            menu.render()
 
     # ---- Private methods
     # ------------------------------------------------------------------------
-    def _show_shortcuts(self, menu):
-        """
-        Show action shortcuts in menu.
-
-        Parameters
-        ----------
-        menu: SpyderMenu
-            Instance of a spyder menu.
-        """
-        menu_actions = menu.actions()
-        for action in menu_actions:
-            if getattr(action, '_shown_shortcut', False):
-                # This is a SpyderAction
-                if action._shown_shortcut is not None:
-                    action.setShortcut(action._shown_shortcut)
-            elif action.menu() is not None:
-                # This is submenu, so we need to call this again
-                self._show_shortcuts(action.menu())
-            else:
-                # We don't need to do anything for other elements
-                continue
-
-    def _hide_shortcuts(self, menu):
-        """
-        Hide action shortcuts in menu.
-
-        Parameters
-        ----------
-        menu: SpyderMenu
-            Instance of a spyder menu.
-        """
-        menu_actions = menu.actions()
-        for action in menu_actions:
-            if getattr(action, '_shown_shortcut', False):
-                # This is a SpyderAction
-                if action._shown_shortcut is not None:
-                    action.setShortcut(QKeySequence())
-            elif action.menu() is not None:
-                # This is submenu, so we need to call this again
-                self._hide_shortcuts(action.menu())
-            else:
-                # We don't need to do anything for other elements
-                continue
-
     def _hide_options_menus(self):
         """Hide options menu when menubar is pressed in macOS."""
         for plugin_name in PLUGIN_REGISTRY:
             plugin_instance = PLUGIN_REGISTRY.get_plugin(plugin_name)
             if isinstance(plugin_instance, SpyderDockablePlugin):
                 if plugin_instance.CONF_SECTION == 'editor':
-                    editorstack = self.editor.get_current_editorstack()
+                    editorstack = self._main.editor.get_current_editorstack()
                     editorstack.menu.hide()
                 else:
-                    try:
-                        # New API
-                        plugin_instance.options_menu.hide()
-                    except AttributeError:
-                        # Old API
-                        plugin_instance._options_menu.hide()
-
-    def _setup_menus(self):
-        """Setup menus."""
-        # Show and hide shortcuts and icons in menus for macOS
-        if sys.platform == 'darwin':
-            for menu_id in self._APPLICATION_MENUS:
-                menu = self._APPLICATION_MENUS[menu_id]
-                if menu is not None:
-                    menu.aboutToShow.connect(
-                        lambda menu=menu: self._show_shortcuts(menu))
-                    menu.aboutToHide.connect(
-                        lambda menu=menu: self._hide_shortcuts(menu))
-                    menu.aboutToShow.connect(
-                        lambda menu=menu: set_menu_icons(menu, False))
-                    menu.aboutToShow.connect(self._hide_options_menus)
+                    plugin_instance.options_menu.hide()
 
     # ---- Public API
     # ------------------------------------------------------------------------
-    def create_application_menu(self, menu_id: str, title: str,
-                                dynamic: bool = True):
+    def create_application_menu(
+        self,
+        menu_id: str,
+        title: str,
+        min_width: Optional[int] = None
+    ):
         """
         Create a Spyder application menu.
 
@@ -183,26 +128,33 @@ class MainMenu(SpyderPluginV2):
             The menu unique identifier string.
         title: str
             The localized menu title to be displayed.
+        min_width: int
+            Minimum width for the menu in pixels.
         """
         if menu_id in self._APPLICATION_MENUS:
             raise SpyderAPIError(
-                'Menu with id "{}" already added!'.format(menu_id))
+                'Menu with id "{}" already added!'.format(menu_id)
+            )
 
-        menu = ApplicationMenu(self.main, title, dynamic=dynamic)
-        menu.menu_id = menu_id
-
+        menu = self._create_menu(
+            menu_id=menu_id,
+            parent=self.main,
+            title=title,
+            min_width=min_width,
+            MenuClass=ApplicationMenu
+        )
         self._APPLICATION_MENUS[menu_id] = menu
         self.main.menuBar().addMenu(menu)
 
-        # Show and hide shortcuts and icons in menus for macOS
         if sys.platform == 'darwin':
-            menu.aboutToShow.connect(
-                lambda menu=menu: self._show_shortcuts(menu))
-            menu.aboutToHide.connect(
-                lambda menu=menu: self._hide_shortcuts(menu))
-            menu.aboutToShow.connect(
-                lambda menu=menu: set_menu_icons(menu, False))
             menu.aboutToShow.connect(self._hide_options_menus)
+
+            # This is necessary because for some strange reason the
+            # "Configuration per file" entry disappears after showing other
+            # dialogs and the only way to make it visible again is by
+            # re-rendering the menu.
+            if menu_id == ApplicationMenus.Run:
+                menu.aboutToShow.connect(lambda: menu.render(force=True))
 
         if menu_id in self._ITEM_QUEUE:
             pending_items = self._ITEM_QUEUE.pop(menu_id)

@@ -23,7 +23,7 @@ import sys
 from qtpy.compat import getopenfilename
 from qtpy.QtCore import Qt, Signal, Slot
 from qtpy.QtWidgets import QAction, QInputDialog, QLineEdit, QVBoxLayout
-from qtpy import PYSIDE2
+from qtpy import PYSIDE2, PYSIDE6
 
 # Local imports
 from spyder.api.exceptions import SpyderAPIError
@@ -34,7 +34,6 @@ from spyder.api.config.decorators import on_conf_change
 from spyder.utils.installers import InstallerInternalError
 from spyder.config.base import DEV, get_debug_level
 from spyder.plugins.console.widgets.internalshell import InternalShell
-from spyder.py3compat import to_text_string
 from spyder.utils.environ import EnvDialog
 from spyder.utils.misc import (get_error_match, getcwd_or_home,
                                remove_backslashes)
@@ -134,6 +133,7 @@ class ConsoleWidget(PluginMainWidget):
         self.dialog_manager = DialogManager()
         self.error_dlg = None
         self.shell = InternalShell(  # TODO: Move to use SpyderWidgetMixin?
+            parent=parent,
             commands=[],
             message=message,
             max_line_count=self.get_conf('max_line_count'),
@@ -310,7 +310,7 @@ class ConsoleWidget(PluginMainWidget):
             pathlist = mimedata2url(source)
             self.shell.drop_pathlist(pathlist)
         elif source.hasText():
-            lines = to_text_string(source.text())
+            lines = str(source.text())
             self.shell.set_cursor_position('eof')
             self.shell.execute_lines(lines)
 
@@ -388,9 +388,19 @@ class ConsoleWidget(PluginMainWidget):
         label = error_data.get("label", "")
         steps = error_data.get("steps", "")
 
+        benign_messages = [
+            # Skip log message when opening PyVista objects in the Variable
+            # Explorer.
+            # Fixes spyder-ide/spyder#21639
+            "ERROR:root:No data to measure...!\n",
+        ]
+
         # Skip errors without traceback (and no text) or dismiss
-        if ((not text and not is_traceback and self.error_dlg is None)
-                or self.dismiss_error):
+        if (
+            (not text and not is_traceback and self.error_dlg is None)
+            or self.dismiss_error
+            or text in benign_messages
+        ):
             return
 
         InstallerInternalError(title + text)
@@ -466,7 +476,7 @@ class ConsoleWidget(PluginMainWidget):
         if self.error_dlg.dismiss_box.isChecked():
             self.dismiss_error = True
 
-        if PYSIDE2:
+        if PYSIDE2 or PYSIDE6:
             self.error_dlg.disconnect(None, None, None)
         else:
             self.error_dlg.disconnect()
@@ -535,7 +545,7 @@ class ConsoleWidget(PluginMainWidget):
         """
         Go to error if relevant.
         """
-        match = get_error_match(to_text_string(text))
+        match = get_error_match(str(text))
         if match:
             fname, lnb = match.groups()
             self.edit_script(fname, int(lnb))
@@ -553,7 +563,7 @@ class ConsoleWidget(PluginMainWidget):
         """
         Execute lines and give focus to shell.
         """
-        self.shell.execute_lines(to_text_string(lines))
+        self.shell.execute_lines(str(lines))
         self.shell.setFocus()
 
     @Slot()
@@ -591,7 +601,7 @@ class ConsoleWidget(PluginMainWidget):
             )
 
         if valid:
-            self.set_conf('external_editor/path', to_text_string(path))
+            self.set_conf('external_editor/path', str(path))
 
     def set_exit_function(self, func):
         """

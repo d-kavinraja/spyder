@@ -1,5 +1,295 @@
 # History of changes
 
+## Version 1.14.0 (2025/12/06)
+
+### New features
+* Add `pylsp.signature.include_docstring` to hide docstring in signatures.
+* Add support for Pylint 4.
+* Fix support for Python 3.14.
+
+### Pull Requests Merged
+
+* [PR 690](https://github.com/python-lsp/python-lsp-server/pull/690) - Fix starting the server for Python 3.14 and run tests with that version, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 689](https://github.com/python-lsp/python-lsp-server/pull/689) - Adjust test based on Jedi version, by [@aeliton](https://github.com/aeliton)
+* [PR 687](https://github.com/python-lsp/python-lsp-server/pull/687) - Bump allowed pylint to less than 4.1, by [@tiltingpenguin](https://github.com/tiltingpenguin)
+* [PR 686](https://github.com/python-lsp/python-lsp-server/pull/686) - Add option to hide docstring in signatures, by [@tomekwojcik](https://github.com/tomekwojcik)
+
+In this release 4 pull requests were closed.
+
+----
+
+## Version 1.13.2 (2025/11/19)
+
+### Pull Requests Merged
+
+* [PR 683](https://github.com/python-lsp/python-lsp-server/pull/683) - Prevent showing cmd on Windows when running flake8, by [@dalthviz](https://github.com/dalthviz)
+* [PR 669](https://github.com/python-lsp/python-lsp-server/pull/669) - Fix license entries in `pyproject.toml` due to pep 639, by [@ccordoba12](https://github.com/ccordoba12)
+
+In this release 2 pull requests were closed.
+
+----
+
+## Version 1.13.1 (2025/08/26)
+
+### Pull Requests Merged
+
+* [PR 667](https://github.com/python-lsp/python-lsp-server/pull/667) - Use PyQt6 for testing, by [@WhyNotHugo](https://github.com/WhyNotHugo)
+* [PR 666](https://github.com/python-lsp/python-lsp-server/pull/666) - Expose a shutdown hook, by [@dlax](https://github.com/dlax)
+* [PR 663](https://github.com/python-lsp/python-lsp-server/pull/663) - Copy `LAST_JEDI_COMPLETIONS` to cell document so that `completionItem/resolve` will work, by [@hjr265](https://github.com/hjr265)
+
+In this release 3 pull requests were closed.
+
+----
+
+## Version 1.13.0 (2025/07/07)
+
+### New features
+* Format signatures in docstrings.
+* Add support for type definition.
+* Send websocket payload using a queue.
+* Fix getting symbols with inline comments that include the `import` word.
+* Drop support for Python 3.8
+
+### Issues Closed
+
+* [Issue 640](https://github.com/python-lsp/python-lsp-server/issues/640) - Should we add `py.typed` marker? ([PR 641](https://github.com/python-lsp/python-lsp-server/pull/641) by [@krassowski](https://github.com/krassowski))
+* [Issue 630](https://github.com/python-lsp/python-lsp-server/issues/630) - Formatting of signatures in docstrings
+* [Issue 627](https://github.com/python-lsp/python-lsp-server/issues/627) - Do not call str.splitlines() twice in the same function
+* [Issue 97](https://github.com/python-lsp/python-lsp-server/issues/97) - Failed to run lsp-goto-type-definition and lsp-goto-implementation.
+
+In this release 4 issues were closed.
+
+### Pull Requests Merged
+
+* [PR 656](https://github.com/python-lsp/python-lsp-server/pull/656) - Add space between punctuation and next sentence, by [@spenserblack](https://github.com/spenserblack)
+* [PR 650](https://github.com/python-lsp/python-lsp-server/pull/650) - Drop Python 3.8, add Python 3.11 to CI and run `pyupgrade`, by [@krassowski](https://github.com/krassowski)
+* [PR 646](https://github.com/python-lsp/python-lsp-server/pull/646) - Enforce `setuptools` 69 or newer to ensure `py.typed` marker gets included, by [@krassowski](https://github.com/krassowski)
+* [PR 645](https://github.com/python-lsp/python-lsp-server/pull/645) - Add support for type definition, by [@Hoblovski](https://github.com/Hoblovski)
+* [PR 641](https://github.com/python-lsp/python-lsp-server/pull/641) - Add `py.typed` marker to `pylsp` imports to be analysed with `mypy`, by [@krassowski](https://github.com/krassowski) ([640](https://github.com/python-lsp/python-lsp-server/issues/640))
+* [PR 639](https://github.com/python-lsp/python-lsp-server/pull/639) - Fix inline comments that include text with `import`, by [@jsbautista](https://github.com/jsbautista)
+* [PR 633](https://github.com/python-lsp/python-lsp-server/pull/633) - Send websocket payload using a queue, by [@Raekkeri](https://github.com/Raekkeri)
+* [PR 631](https://github.com/python-lsp/python-lsp-server/pull/631) - Allow to format signatures in docstrings, by [@krassowski](https://github.com/krassowski)
+* [PR 628](https://github.com/python-lsp/python-lsp-server/pull/628) - Do not call `str.splitlines()` twice in the same function., by [@fukanchik](https://github.com/fukanchik)
+
+In this release 9 pull requests were closed.
+
+----
+
+## Version 1.12.2 (2025/02/07)
+
+### Pull Requests Merged
+
+* [PR 608](https://github.com/python-lsp/python-lsp-server/pull/608) - Fix putting `extra_paths` in front of `sys.path`, by [@cmashinho](https://github.com/cmashinho)
+
+In this release 1 pull request was closed.
+
+----
+
+## Version 1.12.1 (2025/02/06)
+
+### Issues Closed
+
+* [Issue 602](https://github.com/python-lsp/python-lsp-server/issues/602) - `test_jedi_completion_with_fuzzy_enabled` fails with jedi 0.19.2
+
+In this release 1 issue was closed.
+
+### Pull Requests Merged
+
+* [PR 616](https://github.com/python-lsp/python-lsp-server/pull/616) - Fix formatting issues reported by the latest Ruff version, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 609](https://github.com/python-lsp/python-lsp-server/pull/609) - Fix test for Jedi 0.19.2, by [@cmashinho](https://github.com/cmashinho)
+* [PR 604](https://github.com/python-lsp/python-lsp-server/pull/604) - Correctly handle null value for `ropeFolder` config, by [@osiewicz](https://github.com/osiewicz)
+
+In this release 3 pull requests were closed.
+
+----
+
+## Version 1.12.0 (2024/08/25)
+
+### New features
+
+* Add support for `window/logMessage`.
+* Add version support to `workspace/publishDiagnostics`.
+* Add `extendSelect` option to flake8 plugin.
+* Allow Jedi's `extra_paths` to be placed in front of `sys.path`.
+* Bump flake8 to 7.1
+
+### Pull Requests Merged
+
+* [PR 586](https://github.com/python-lsp/python-lsp-server/pull/586) - Update versions of Github actions used on CI, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 585](https://github.com/python-lsp/python-lsp-server/pull/585) - Fix linting issues reported by the latest version of Ruff, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 584](https://github.com/python-lsp/python-lsp-server/pull/584) - Use `%r` to have a better log, by [@tebeka](https://github.com/tebeka)
+* [PR 581](https://github.com/python-lsp/python-lsp-server/pull/581) - Set return type to `None` for functions without returns, by [@agserrano3](https://github.com/agserrano3)
+* [PR 576](https://github.com/python-lsp/python-lsp-server/pull/576) - Bump flake8 to 7.1, by [@bnavigator](https://github.com/bnavigator)
+* [PR 573](https://github.com/python-lsp/python-lsp-server/pull/573) - Add `window/logMessage` support, by [@Dylmay](https://github.com/Dylmay)
+* [PR 570](https://github.com/python-lsp/python-lsp-server/pull/570) - Fix Fedora instructions, by [@penguinpee](https://github.com/penguinpee)
+* [PR 565](https://github.com/python-lsp/python-lsp-server/pull/565) - Add version support to `workspace/publishDiagnostics`, by [@Dylmay](https://github.com/Dylmay)
+* [PR 560](https://github.com/python-lsp/python-lsp-server/pull/560) - Use macOS 13 to run our tests on CI, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 559](https://github.com/python-lsp/python-lsp-server/pull/559) - Add `extendSelect` option to flake8 plugin, by [@Susensio](https://github.com/Susensio)
+* [PR 547](https://github.com/python-lsp/python-lsp-server/pull/547) - Infer end position for Pylint diagnostics, by [@Wuestengecko](https://github.com/Wuestengecko)
+* [PR 527](https://github.com/python-lsp/python-lsp-server/pull/527) - Allow `extra_paths` to be placed in front of `sys.path`, by [@mrclary](https://github.com/mrclary)
+
+In this release 12 pull requests were closed.
+
+----
+
+## Version 1.11.0 (2024/03/29)
+
+### New features
+
+* Remove the `rope_rename` plugin. People that were using it need to install
+  the `pylsp-rope` third-party plugin instead.
+* Add support for Pylint 3.1
+
+### Issues Closed
+
+* [Issue 255](https://github.com/python-lsp/python-lsp-server/issues/255) - Confusion about rename support ([PR 515](https://github.com/python-lsp/python-lsp-server/pull/515) by [@doolio](https://github.com/doolio))
+
+In this release 1 issue was closed.
+
+### Pull Requests Merged
+
+* [PR 543](https://github.com/python-lsp/python-lsp-server/pull/543) - Bump pylint to `>=3.1,<4`, by [@bnavigator](https://github.com/bnavigator)
+* [PR 541](https://github.com/python-lsp/python-lsp-server/pull/541) - Add fallback for `ujson` import, by [@Savalek](https://github.com/Savalek)
+* [PR 538](https://github.com/python-lsp/python-lsp-server/pull/538) - Remove `.config/flake8` reference in Readme, by [@justin-f-perez](https://github.com/justin-f-perez)
+* [PR 536](https://github.com/python-lsp/python-lsp-server/pull/536) - Fix isort plugin name in Readme, by [@Piraty](https://github.com/Piraty)
+* [PR 515](https://github.com/python-lsp/python-lsp-server/pull/515) - Remove built-in `rope_rename` plugin, by [@doolio](https://github.com/doolio) ([255](https://github.com/python-lsp/python-lsp-server/issues/255))
+* [PR 470](https://github.com/python-lsp/python-lsp-server/pull/470) - Add contributing guide to setup dev environment, by [@staticf0x](https://github.com/staticf0x)
+
+In this release 6 pull requests were closed.
+
+----
+
+## Version 1.10.1 (2024/03/12)
+
+### Issues Closed
+
+* [Issue 529](https://github.com/python-lsp/python-lsp-server/issues/529) - Autoimports: sqlite3.OperationalError: database is locked ([PR 530](https://github.com/python-lsp/python-lsp-server/pull/530) by [@last-partizan](https://github.com/last-partizan))
+
+In this release 1 issue was closed.
+
+### Pull Requests Merged
+
+* [PR 530](https://github.com/python-lsp/python-lsp-server/pull/530) - Fix progress reporting with autoimport plugin, by [@last-partizan](https://github.com/last-partizan) ([529](https://github.com/python-lsp/python-lsp-server/issues/529))
+* [PR 528](https://github.com/python-lsp/python-lsp-server/pull/528) - Improve error message about missing `websockets` module, by [@tomplus](https://github.com/tomplus)
+
+In this release 2 pull requests were closed.
+
+----
+
+## Version 1.10.0 (2024/01/21)
+
+### New features
+
+* Add support for notebook document completions.
+* Add support for flake8 version 7.
+
+### Issues Closed
+
+* [Issue 513](https://github.com/python-lsp/python-lsp-server/issues/513) - Different versions of autopep can be installed as optional dependencies ([PR 514](https://github.com/python-lsp/python-lsp-server/pull/514) by [@doolio](https://github.com/doolio))
+* [Issue 478](https://github.com/python-lsp/python-lsp-server/issues/478) - Considering pointing to python-lsp-isort rather than pyls-isort in the README ([PR 483](https://github.com/python-lsp/python-lsp-server/pull/483) by [@doolio](https://github.com/doolio))
+* [Issue 474](https://github.com/python-lsp/python-lsp-server/issues/474) - AutoImport can break when being called by multiple threads ([PR 498](https://github.com/python-lsp/python-lsp-server/pull/498) by [@tkrabel](https://github.com/tkrabel))
+* [Issue 373](https://github.com/python-lsp/python-lsp-server/issues/373) - file path auto completion add \ in path string ([PR 497](https://github.com/python-lsp/python-lsp-server/pull/497) by [@i-aki-y](https://github.com/i-aki-y))
+* [Issue 256](https://github.com/python-lsp/python-lsp-server/issues/256) - Flake8 Severity too high ([PR 490](https://github.com/python-lsp/python-lsp-server/pull/490) by [@kunhtkun](https://github.com/kunhtkun))
+
+In this release 5 issues were closed.
+
+### Pull Requests Merged
+
+* [PR 517](https://github.com/python-lsp/python-lsp-server/pull/517) - Combine ruff.toml into pyproject.toml, by [@doolio](https://github.com/doolio)
+* [PR 514](https://github.com/python-lsp/python-lsp-server/pull/514) - Fix optional dependency version for autopep8, by [@doolio](https://github.com/doolio) ([513](https://github.com/python-lsp/python-lsp-server/issues/513))
+* [PR 510](https://github.com/python-lsp/python-lsp-server/pull/510) - Bump flake8 to version 7, by [@bnavigator](https://github.com/bnavigator)
+* [PR 507](https://github.com/python-lsp/python-lsp-server/pull/507) - Fix extra end line increment in autopep8 plugin, by [@remisalmon](https://github.com/remisalmon)
+* [PR 502](https://github.com/python-lsp/python-lsp-server/pull/502) - Use ruff as linter and code formatter, by [@tkrabel](https://github.com/tkrabel)
+* [PR 499](https://github.com/python-lsp/python-lsp-server/pull/499) - Make autoimport cache generation non-blocking, by [@tkrabel](https://github.com/tkrabel)
+* [PR 498](https://github.com/python-lsp/python-lsp-server/pull/498) - Update rope to 1.11.0 for multi-threading capabilities, by [@tkrabel](https://github.com/tkrabel) ([474](https://github.com/python-lsp/python-lsp-server/issues/474))
+* [PR 497](https://github.com/python-lsp/python-lsp-server/pull/497) - Fix path completion when client doesn't support code snippets, by [@i-aki-y](https://github.com/i-aki-y) ([373](https://github.com/python-lsp/python-lsp-server/issues/373))
+* [PR 490](https://github.com/python-lsp/python-lsp-server/pull/490) - Refine diagnostic severity for flake8, by [@kunhtkun](https://github.com/kunhtkun) ([256](https://github.com/python-lsp/python-lsp-server/issues/256))
+* [PR 487](https://github.com/python-lsp/python-lsp-server/pull/487) - Replace call to `python` with `sys.executable` in Pylint plugin, by [@jspricke](https://github.com/jspricke)
+* [PR 486](https://github.com/python-lsp/python-lsp-server/pull/486) - Add support for notebook document completions, by [@smacke](https://github.com/smacke)
+* [PR 483](https://github.com/python-lsp/python-lsp-server/pull/483) - Point to a more up to date isort plugin in README, by [@doolio](https://github.com/doolio) ([478](https://github.com/python-lsp/python-lsp-server/issues/478))
+
+In this release 12 pull requests were closed.
+
+----
+
+## Version 1.9.0 (2023/11/06)
+
+### New features
+
+* Support `initializationOptions` to configure the server.
+* Add code completions to the autoimport plugin.
+* Add support for Pylint 3.
+* Pass `extendIgnore` argument to Flake8.
+* Add new `pylsp_workspace_configuration_changed` hookspec so that plugins can
+  react when client sends a configuration change to the server.
+
+### Issues Closed
+
+* [Issue 460](https://github.com/python-lsp/python-lsp-server/issues/460) - rope_autoimport doesn't initialize after `workspace/didChangeConfiguration` message ([PR 461](https://github.com/python-lsp/python-lsp-server/pull/461) by [@tkrabel-db](https://github.com/tkrabel-db))
+* [Issue 403](https://github.com/python-lsp/python-lsp-server/issues/403) - Add code action for implementing auto-import ([PR 471](https://github.com/python-lsp/python-lsp-server/pull/471) by [@tkrabel-db](https://github.com/tkrabel-db))
+* [Issue 195](https://github.com/python-lsp/python-lsp-server/issues/195) - Maybe use initializationOptions as additional source of settings ([PR 459](https://github.com/python-lsp/python-lsp-server/pull/459) by [@tkrabel-db](https://github.com/tkrabel-db))
+
+In this release 3 issues were closed.
+
+### Pull Requests Merged
+
+* [PR 481](https://github.com/python-lsp/python-lsp-server/pull/481) - Revert "Rename `_utils` module to `utils`", by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 480](https://github.com/python-lsp/python-lsp-server/pull/480) - Rename `_utils` module to `utils`, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 475](https://github.com/python-lsp/python-lsp-server/pull/475) - Raise supported Pylint upper version, by [@bnavigator](https://github.com/bnavigator)
+* [PR 473](https://github.com/python-lsp/python-lsp-server/pull/473) - Improve/simplify README Development section, by [@tkrabel](https://github.com/tkrabel)
+* [PR 471](https://github.com/python-lsp/python-lsp-server/pull/471) - Add code completions to `rope_autoimport` plugin, by [@tkrabel-db](https://github.com/tkrabel-db) ([403](https://github.com/python-lsp/python-lsp-server/issues/403))
+* [PR 469](https://github.com/python-lsp/python-lsp-server/pull/469) - Pass argument `extendIgnore` to flake8, by [@UnkwUsr](https://github.com/UnkwUsr)
+* [PR 466](https://github.com/python-lsp/python-lsp-server/pull/466) - Ignore notebook names on cell completion for autoimport, by [@tkrabel-db](https://github.com/tkrabel-db)
+* [PR 464](https://github.com/python-lsp/python-lsp-server/pull/464) - Minor bug fix in Rope autoimport plugin, by [@tkrabel-db](https://github.com/tkrabel-db)
+* [PR 462](https://github.com/python-lsp/python-lsp-server/pull/462) - Make workspace/didChangeConfig work with notebook documents, by [@tkrabel-db](https://github.com/tkrabel-db)
+* [PR 461](https://github.com/python-lsp/python-lsp-server/pull/461) - Load `rope_autoimport` cache on `workspace/didChangeConfiguration`, by [@tkrabel-db](https://github.com/tkrabel-db) ([460](https://github.com/python-lsp/python-lsp-server/issues/460))
+* [PR 459](https://github.com/python-lsp/python-lsp-server/pull/459) - Support `initializationOptions` to configure the server, by [@tkrabel-db](https://github.com/tkrabel-db) ([195](https://github.com/python-lsp/python-lsp-server/issues/195))
+* [PR 457](https://github.com/python-lsp/python-lsp-server/pull/457) - Fix missing signatures for docstrings in Markdown, by [@staticf0x](https://github.com/staticf0x)
+
+In this release 12 pull requests were closed.
+
+----
+
+## Version 1.8.2 (2023/10/09)
+
+### Issues Closed
+
+* [Issue 453](https://github.com/python-lsp/python-lsp-server/issues/453) - notebookDocumentSync notebookSelector type error ([PR 454](https://github.com/python-lsp/python-lsp-server/pull/454) by [@smacke](https://github.com/smacke))
+
+In this release 1 issue was closed.
+
+### Pull Requests Merged
+
+* [PR 454](https://github.com/python-lsp/python-lsp-server/pull/454) - Fix notebook document selector not being a list in capabilities, by [@smacke](https://github.com/smacke) ([453](https://github.com/python-lsp/python-lsp-server/issues/453))
+
+In this release 1 pull request was closed.
+
+----
+
+## Version 1.8.1 (2023/10/05)
+
+### Issues Closed
+
+* [Issue 439](https://github.com/python-lsp/python-lsp-server/issues/439) - `includeDeclaration` is no longer respected in `textDocument/references` ([PR 440](https://github.com/python-lsp/python-lsp-server/pull/440) by [@krassowski](https://github.com/krassowski))
+* [Issue 438](https://github.com/python-lsp/python-lsp-server/issues/438) - flake8 can error out when deleting lines ([PR 441](https://github.com/python-lsp/python-lsp-server/pull/441) by [@krassowski](https://github.com/krassowski))
+* [Issue 413](https://github.com/python-lsp/python-lsp-server/issues/413) - textDocument/rename reports positions outside of the document ([PR 450](https://github.com/python-lsp/python-lsp-server/pull/450) by [@ccordoba12](https://github.com/ccordoba12))
+
+In this release 3 issues were closed.
+
+### Pull Requests Merged
+
+* [PR 450](https://github.com/python-lsp/python-lsp-server/pull/450) - Fix renaming when file has no EOLs, by [@ccordoba12](https://github.com/ccordoba12) ([413](https://github.com/python-lsp/python-lsp-server/issues/413))
+* [PR 449](https://github.com/python-lsp/python-lsp-server/pull/449) - Increase minimal required version of autopep8 to `>=2.0.4,<2.1.0`, by [@ccordoba12](https://github.com/ccordoba12)
+* [PR 447](https://github.com/python-lsp/python-lsp-server/pull/447) - Fix numpy go-to-definition by taking it off autoimport list for this case, by [@smacke](https://github.com/smacke)
+* [PR 443](https://github.com/python-lsp/python-lsp-server/pull/443) - Allow Jedi "goto" to perform multiple hops for "go to definition", by [@smacke](https://github.com/smacke)
+* [PR 441](https://github.com/python-lsp/python-lsp-server/pull/441) - Pass a single copy of the document's source around for flake8, by [@krassowski](https://github.com/krassowski) ([438](https://github.com/python-lsp/python-lsp-server/issues/438))
+* [PR 440](https://github.com/python-lsp/python-lsp-server/pull/440) - Fix `include_declaration` handling in references request, by [@krassowski](https://github.com/krassowski) ([439](https://github.com/python-lsp/python-lsp-server/issues/439))
+* [PR 436](https://github.com/python-lsp/python-lsp-server/pull/436) - Add black reformatting commit to `.git-blame-ignore-revs`, by [@krassowski](https://github.com/krassowski)
+
+In this release 7 pull requests were closed.
+
+----
+
 ## Version 1.8.0 (2023/09/08)
 
 ### New features

@@ -29,7 +29,7 @@ class SpyderLayout(BaseGridLayoutType):
         super().__init__(parent_plugin)
 
         self.add_area(
-            [Plugins.Projects],
+            [Plugins.Projects, Plugins.OutlineExplorer],
             row=0,
             column=0,
             row_span=2,
@@ -42,35 +42,34 @@ class SpyderLayout(BaseGridLayoutType):
             row_span=2,
         )
         self.add_area(
-            [Plugins.OutlineExplorer],
+            [
+                Plugins.Help,
+                Plugins.VariableExplorer,
+                Plugins.Debugger,
+                Plugins.Profiler,
+                Plugins.Plots,
+                Plugins.Explorer,
+                Plugins.Find,
+                Plugins.OnlineHelp,
+            ],
             row=0,
             column=2,
-            row_span=2,
-            visible=False,
-        )
-        self.add_area(
-            [Plugins.Help, Plugins.VariableExplorer,
-             Plugins.Debugger, Plugins.Plots,
-             Plugins.OnlineHelp, Plugins.Explorer, Plugins.Find],
-            row=0,
-            column=3,
             default=True,
             hidden_plugin_ids=[Plugins.OnlineHelp, Plugins.Find]
         )
         self.add_area(
             [Plugins.IPythonConsole, Plugins.History, Plugins.Console],
             row=1,
-            column=3,
+            column=2,
             hidden_plugin_ids=[Plugins.Console]
         )
 
         self.set_column_stretch(0, 1)
-        self.set_column_stretch(1, 4)
-        self.set_column_stretch(2, 1)
-        self.set_column_stretch(3, 4)
+        self.set_column_stretch(1, 3)
+        self.set_column_stretch(2, 3)
 
     def get_name(self):
-        return _("Spyder Default Layout")
+        return _("Default layout")
 
 
 class HorizontalSplitLayout(BaseGridLayoutType):
@@ -85,9 +84,16 @@ class HorizontalSplitLayout(BaseGridLayoutType):
             column=0,
         )
         self.add_area(
-            [Plugins.IPythonConsole, Plugins.Explorer, Plugins.Help,
-             Plugins.VariableExplorer,
-             Plugins.Debugger, Plugins.Plots, Plugins.History],
+            [
+                Plugins.IPythonConsole,
+                Plugins.Explorer,
+                Plugins.Help,
+                Plugins.VariableExplorer,
+                Plugins.Debugger,
+                Plugins.Profiler,
+                Plugins.Plots,
+                Plugins.History,
+            ],
             row=0,
             column=1,
             default=True,
@@ -112,9 +118,16 @@ class VerticalSplitLayout(BaseGridLayoutType):
             column=0,
         )
         self.add_area(
-            [Plugins.IPythonConsole, Plugins.Explorer, Plugins.Help,
-             Plugins.VariableExplorer,
-             Plugins.Debugger, Plugins.Plots, Plugins.History],
+            [
+                Plugins.IPythonConsole,
+                Plugins.Explorer,
+                Plugins.Help,
+                Plugins.VariableExplorer,
+                Plugins.Debugger,
+                Plugins.Profiler,
+                Plugins.Plots,
+                Plugins.History,
+            ],
             row=1,
             column=0,
             default=True,
@@ -145,9 +158,15 @@ class RLayout(BaseGridLayoutType):
             hidden_plugin_ids=[Plugins.Console]
         )
         self.add_area(
-            [Plugins.VariableExplorer,
-             Plugins.Debugger, Plugins.Plots, Plugins.History,
-             Plugins.OutlineExplorer, Plugins.Find],
+            [
+                Plugins.VariableExplorer,
+                Plugins.Debugger,
+                Plugins.Profiler,
+                Plugins.Plots,
+                Plugins.History,
+                Plugins.OutlineExplorer,
+                Plugins.Find,
+            ],
             row=0,
             column=1,
             default=True,
@@ -194,8 +213,13 @@ class MatlabLayout(BaseGridLayoutType):
             hidden_plugin_ids=[Plugins.Console]
         )
         self.add_area(
-            [Plugins.VariableExplorer,
-             Plugins.Debugger, Plugins.Plots, Plugins.Find],
+            [
+                Plugins.VariableExplorer,
+                Plugins.Debugger,
+                Plugins.Profiler,
+                Plugins.Plots,
+                Plugins.Find,
+            ],
             row=0,
             column=2,
             default=True,

@@ -9,23 +9,23 @@ import time
 
 try:
     import ujson as json
-except Exception:  # pylint: disable=broad-except
+except Exception:
     import json
 
+from ._version import __version__
 from .python_lsp import (
     PythonLSPServer,
     start_io_lang_server,
     start_tcp_lang_server,
     start_ws_lang_server,
 )
-from ._version import __version__
 
-LOG_FORMAT = "%(asctime)s {0} - %(levelname)s - %(name)s - %(message)s".format(
+LOG_FORMAT = "%(asctime)s {} - %(levelname)s - %(name)s - %(message)s".format(
     time.localtime().tm_zone
 )
 
 
-def add_arguments(parser):
+def add_arguments(parser) -> None:
     parser.description = "Python Language Server"
 
     parser.add_argument(
@@ -40,7 +40,7 @@ def add_arguments(parser):
         "--check-parent-process",
         action="store_true",
         help="Check whether parent process is still alive using os.kill(ppid, 0) "
-        "and auto shut down language server process when parent process is not alive."
+        "and auto shut down language server process when parent process is not alive. "
         "Note that this may not work on a Windows machine.",
     )
 
@@ -50,7 +50,7 @@ def add_arguments(parser):
     )
     log_group.add_argument(
         "--log-file",
-        help="Redirect logs to the given file instead of writing to stderr."
+        help="Redirect logs to the given file instead of writing to stderr. "
         "Has no effect if used with --log-config.",
     )
 
@@ -67,7 +67,7 @@ def add_arguments(parser):
     )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     add_arguments(parser)
     args = parser.parse_args()
@@ -94,11 +94,11 @@ def _binary_stdio():
     return stdin, stdout
 
 
-def _configure_logger(verbose=0, log_config=None, log_file=None):
+def _configure_logger(verbose=0, log_config=None, log_file=None) -> None:
     root_logger = logging.root
 
     if log_config:
-        with open(log_config, "r", encoding="utf-8") as f:
+        with open(log_config, encoding="utf-8") as f:
             logging.config.dictConfig(json.load(f))
     else:
         formatter = logging.Formatter(LOG_FORMAT)

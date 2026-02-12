@@ -20,23 +20,37 @@ import sys
 import traceback
 import tempfile
 import threading
+import inspect
+import cloudpickle
 
 # Third-party imports
 from ipykernel.ipkernel import IPythonKernel
-from ipykernel import eventloops, get_connection_info
-from traitlets.config.loader import LazyConfigValue
+from ipykernel import get_connection_info
+from IPython.core import release as ipython_release
+from packaging.version import parse as parse_version
+from traitlets.config.loader import Config, LazyConfigValue
 import zmq
 from zmq.utils.garbage import gc
 
 # Local imports
+import spyder_kernels
+from spyder_kernels.comms.commbase import stacksummary_to_json
 from spyder_kernels.comms.frontendcomm import FrontendComm
 from spyder_kernels.comms.decorators import (
     register_comm_handlers, comm_handler)
+from spyder_kernels.utils.pythonenv import (
+    get_env_dir,
+    is_conda_env,
+    is_pixi_env,
+    is_pyenv_env,
+    PythonEnvInfo,
+    PythonEnvType,
+)
 from spyder_kernels.utils.iofuncs import iofunctions
-from spyder_kernels.utils.mpl import (
-    MPL_BACKENDS_FROM_SPYDER, MPL_BACKENDS_TO_SPYDER, INLINE_FIGURE_FORMATS)
+from spyder_kernels.utils.mpl import automatic_backend, MPL_BACKENDS_TO_SPYDER
 from spyder_kernels.utils.nsview import (
     get_remote_data, make_remote_view, get_size)
+from spyder_kernels.utils.style import create_pygments_dict, create_style_class
 from spyder_kernels.console.shell import SpyderShell
 from spyder_kernels.comms.utils import WriteContext
 
@@ -65,7 +79,6 @@ class SpyderKernel(IPythonKernel):
         register_comm_handlers(self.shell, self.frontend_comm)
 
         self.namespace_view_settings = {}
-        self._mpl_backend_error = None
         self.faulthandler_handle = None
         self._cwd_initialised = False
 
@@ -76,6 +89,29 @@ class SpyderKernel(IPythonKernel):
 
         # Socket to signal shell_stream locally
         self.loopback_socket = None
+
+        # To track the interactive backend
+        self.interactive_backend = None
+
+        # To save the python env info
+        self.pythonenv_info: PythonEnvInfo = {}
+
+        # Store original sys.path. Kernels are started with PYTHONPATH
+        # removed from environment variables, so this will never have
+        # user paths and should be clean.
+        self._sys_path = sys.path.copy()
+
+    @property
+    def kernel_info(self):
+        # Used for checking correct version by spyder
+        infos = super().kernel_info
+        infos.update({
+            "spyder_kernels_info": (
+                spyder_kernels.__version__,
+                sys.executable
+            )
+        })
+        return infos
 
     # -- Public API -----------------------------------------------------------
     def frontend_call(self, blocking=False, broadcast=True,
@@ -114,7 +150,6 @@ class SpyderKernel(IPythonKernel):
         except Exception:
             pass
 
-    @comm_handler
     def enable_faulthandler(self):
         """
         Open a file to save the faulthandling and identifiers for
@@ -125,13 +160,15 @@ class SpyderKernel(IPythonKernel):
             # Do not use /tmp for temporary files
             try:
                 from xdg.BaseDirectory import xdg_data_home
-                fault_dir = xdg_data_home
+                fault_dir = os.path.join(xdg_data_home, "spyder")
                 os.makedirs(fault_dir, exist_ok=True)
             except Exception:
                 fault_dir = None
 
         self.faulthandler_handle = tempfile.NamedTemporaryFile(
-            'wt', suffix='.fault', dir=fault_dir)
+            'wt', suffix='.fault', dir=fault_dir
+        )
+
         main_id = threading.main_thread().ident
         system_ids = [
             thread.ident for thread in threading.enumerate()
@@ -139,6 +176,11 @@ class SpyderKernel(IPythonKernel):
         ]
         faulthandler.enable(self.faulthandler_handle)
         return self.faulthandler_handle.name, main_id, system_ids
+
+    @comm_handler
+    def safe_exec(self, filename):
+        """Safely execute a file using IPKernelApp._exec_file."""
+        self.parent._exec_file(filename)
 
     @comm_handler
     def get_fault_text(self, fault_filename, main_id, ignore_ids):
@@ -157,9 +199,7 @@ class SpyderKernel(IPythonKernel):
         # Remove file
         try:
             os.remove(fault_filename)
-        except FileNotFoundError:
-            pass
-        except PermissionError:
+        except Exception:
             pass
 
         # Process file
@@ -239,7 +279,7 @@ class SpyderKernel(IPythonKernel):
         """Get the current frames."""
         ignore_list = self.get_system_threads_id()
         main_id = threading.main_thread().ident
-        frames = {}
+        stack_dict = {}
         thread_names = {thread.ident: thread.name
                         for thread in threading.enumerate()}
 
@@ -256,15 +296,14 @@ class SpyderKernel(IPythonKernel):
                     thread_name = thread_names[thread_id]
                 else:
                     thread_name = str(thread_id)
-                frames[thread_name] = stack
-        return frames
+
+                # Transform stack in a dict because FrameSummary objects
+                # are not compatible between versions of Python
+                stack_dict[thread_name] = stacksummary_to_json(stack)
+
+        return stack_dict
 
     # --- For the Variable Explorer
-    @comm_handler
-    def set_namespace_view_settings(self, settings):
-        """Set namespace_view_settings."""
-        self.namespace_view_settings = settings
-
     @comm_handler
     def get_namespace_view(self, frame=None):
         """
@@ -333,14 +372,27 @@ class SpyderKernel(IPythonKernel):
             return None
 
     @comm_handler
-    def get_value(self, name):
+    def get_value(self, name, encoded=False):
         """Get the value of a variable"""
         ns = self.shell._get_current_namespace()
-        return ns[name]
+        value = ns[name]
+
+        if str(type(value)) == "<class 'polars.dataframe.frame.DataFrame'>":
+            # Convert polars dataframes to pandas
+            value = value.to_pandas()
+
+        if encoded:
+            # Encode with cloudpickle
+            value = cloudpickle.dumps(value)
+        return value
 
     @comm_handler
-    def set_value(self, name, value):
+    def set_value(self, name, value, encoded=False):
         """Set the value of a variable"""
+        if encoded:
+            # Decode_value
+            value = cloudpickle.loads(value)
+
         ns = self.shell._get_reference_namespace(name)
         ns[name] = value
         self.log.debug(ns)
@@ -404,9 +456,21 @@ class SpyderKernel(IPythonKernel):
         return iofunctions.save(data, filename)
 
     # --- For Pdb
-    def _do_complete(self, code, cursor_pos):
+    async def _do_complete(self, code, cursor_pos):
         """Call parent class do_complete"""
-        return super(SpyderKernel, self).do_complete(code, cursor_pos)
+        super_method = super().do_complete
+
+        # handle async def do_comlpete
+        if inspect.iscoroutinefunction(super_method):
+            return await super_method(code, cursor_pos)
+
+        result = super_method(code, cursor_pos)
+
+        # handle sync do_complete, returns a Future.
+        if inspect.isawaitable(result):
+            result = await result
+
+        return result
 
     def do_complete(self, code, cursor_pos):
         """
@@ -485,7 +549,7 @@ class SpyderKernel(IPythonKernel):
         """Get current matplotlib backend."""
         try:
             import matplotlib
-            return MPL_BACKENDS_TO_SPYDER[matplotlib.get_backend()]
+            return MPL_BACKENDS_TO_SPYDER[matplotlib.get_backend().lower()]
         except Exception:
             return None
 
@@ -495,94 +559,73 @@ class SpyderKernel(IPythonKernel):
         Get current Matplotlib interactive backend.
 
         This is different from the current backend because, for instance, the
-        user can set first the Qt5 backend, then the Inline one. In that case,
-        the current backend is Inline, but the current interactive one is Qt5,
+        user can set first the Qt backend, then the Inline one. In that case,
+        the current backend is Inline, but the current interactive one is Qt,
         and this backend can't be changed without a kernel restart.
         """
-        # Mapping from frameworks to backend names.
-        mapping = {
-            'qt': 'QtAgg',
-            'tk': 'TkAgg',
-            'macosx': 'MacOSX'
-        }
-
-        # --- Get interactive framework
-        framework = None
-
-        # Detect if there is a graphical framework running by checking the
-        # eventloop function attached to the kernel.eventloop attribute (see
-        # `ipykernel.eventloops.enable_gui` for context).
-        loop_func = self.eventloop
-
-        if loop_func is not None:
-            if loop_func == eventloops.loop_tk:
-                framework = 'tk'
-            elif loop_func == eventloops.loop_qt5:
-                framework = 'qt'
-            elif loop_func == eventloops.loop_cocoa:
-                framework = 'macosx'
-            else:
-                # Spyder doesn't handle other backends
-                framework = 'other'
+        # Backends that Spyder can handle
+        recognized_backends = {'qt', 'tk', 'macosx'}
 
         # --- Return backend according to framework
-        if framework is None:
-            # Since no interactive backend has been set yet, this is
-            # equivalent to having the inline one.
-            return 0
-        elif framework in mapping:
-            return MPL_BACKENDS_TO_SPYDER[mapping[framework]]
+        if self.interactive_backend is None:
+            # Since no interactive backend has been set yet, this is equivalent
+            # to having the inline one.
+            return 'inline'
+        elif self.interactive_backend in recognized_backends:
+            return self.interactive_backend
         else:
             # This covers the case of other backends (e.g. Wx or Gtk)
             # which users can set interactively with the %matplotlib
             # magic but not through our Preferences.
             return -1
 
-    def set_matplotlib_backend(self, backend, pylab=False):
-        """Set matplotlib backend given a Spyder backend option."""
-        mpl_backend = MPL_BACKENDS_FROM_SPYDER[str(backend)]
-        self._set_mpl_backend(mpl_backend, pylab=pylab)
+    @comm_handler
+    def set_matplotlib_conf(self, conf):
+        """Set matplotlib configuration"""
+        pylab_autoload_n = 'pylab/autoload'
+        pylab_backend_n = 'pylab/backend'
+        figure_format_n = 'pylab/inline/figure_format'
+        resolution_n = 'pylab/inline/resolution'
+        width_n = 'pylab/inline/width'
+        height_n = 'pylab/inline/height'
+        fontsize_n = 'pylab/inline/fontsize'
+        bottom_n = 'pylab/inline/bottom'
+        bbox_inches_n = 'pylab/inline/bbox_inches'
 
-    def set_mpl_inline_figure_format(self, figure_format):
-        """Set the inline figure format to use with matplotlib."""
-        mpl_figure_format = INLINE_FIGURE_FORMATS[figure_format]
-        self._set_config_option(
-            'InlineBackend.figure_format', mpl_figure_format)
+        if figure_format_n in conf:
+            self._set_inline_config_option(
+                'figure_formats', conf[figure_format_n]
+            )
 
-    def set_mpl_inline_resolution(self, resolution):
-        """Set inline figure resolution."""
-        self._set_mpl_inline_rc_config('figure.dpi', resolution)
+        inline_rc = {}
+        if resolution_n in conf:
+            inline_rc.update({'figure.dpi': conf[resolution_n]})
+        if width_n in conf or height_n in conf:
+            inline_rc.update(
+                {'figure.figsize': (conf[width_n], conf[height_n])}
+            )
+        if fontsize_n in conf:
+            inline_rc.update({'font.size': conf[fontsize_n]})
+        if bottom_n in conf:
+            inline_rc.update({'figure.subplot.bottom': conf[bottom_n]})
 
-    def set_mpl_inline_figure_size(self, width, height):
-        """Set inline figure size."""
-        value = (width, height)
-        self._set_mpl_inline_rc_config('figure.figsize', value)
+        # Update Inline backend parameters, if available.
+        if inline_rc:
+            self._set_inline_config_option('rc', inline_rc)
 
-    def set_mpl_inline_bbox_inches(self, bbox_inches):
-        """
-        Set inline print figure bbox inches.
+        if bbox_inches_n in conf:
+            bbox_inches = 'tight' if conf[bbox_inches_n] else None
+            self._set_inline_config_option(
+                'print_figure_kwargs', {'bbox_inches': bbox_inches}
+            )
 
-        The change is done by updating the 'print_figure_kwargs' config dict.
-        """
-        config = self.config
-        inline_config = (
-            config['InlineBackend'] if 'InlineBackend' in config else {})
-        print_figure_kwargs = (
-            inline_config['print_figure_kwargs']
-            if 'print_figure_kwargs' in inline_config else {})
-        bbox_inches_dict = {
-            'bbox_inches': 'tight' if bbox_inches else None}
-        print_figure_kwargs.update(bbox_inches_dict)
-
-        # This seems to be necessary for newer versions of Traitlets because
-        # print_figure_kwargs doesn't return a dict.
-        if isinstance(print_figure_kwargs, LazyConfigValue):
-            figure_kwargs_dict = print_figure_kwargs.to_dict().get('update')
-            if figure_kwargs_dict:
-                print_figure_kwargs = figure_kwargs_dict
-
-        self._set_config_option(
-            'InlineBackend.print_figure_kwargs', print_figure_kwargs)
+        # Only update backend if it has changed or if autoloading pylab.
+        pylab_autoload_o = conf.get(pylab_autoload_n, False)
+        current_backend = self.get_matplotlib_backend()
+        pylab_backend_o = conf.get(pylab_backend_n, current_backend)
+        backend_changed = current_backend != pylab_backend_o
+        if pylab_autoload_o or backend_changed:
+            self._set_mpl_backend(pylab_backend_o, pylab_autoload_o)
 
     # -- For completions
     def set_jedi_completer(self, use_jedi):
@@ -599,11 +642,101 @@ class SpyderKernel(IPythonKernel):
 
     # --- Additional methods
     @comm_handler
-    def set_cwd(self, dirname):
-        """Set current working directory."""
-        self._cwd_initialised = True
-        os.chdir(dirname)
-        self.publish_state()
+    def set_configuration(self, conf):
+        """Set kernel configuration"""
+        ret = {}
+        for key, value in conf.items():
+            if key == "cwd":
+                self._cwd_initialised = True
+                os.chdir(value)
+                self.publish_state()
+            elif key == "namespace_view_settings":
+                self.namespace_view_settings = value
+                self.publish_state()
+            elif key == "pdb":
+                self.shell.set_pdb_configuration(value)
+            elif key == "faulthandler":
+                if value:
+                    ret[key] = self.enable_faulthandler()
+            elif key == "special_kernel":
+                try:
+                    self.set_special_kernel(value)
+                except Exception:
+                    ret["special_kernel_error"] = value
+            elif key == "color scheme":
+                self.set_color_scheme(value)
+            elif key == "traceback_highlight_style":
+                # This doesn't work in Python 3.8 because the last IPython
+                # version compatible with it doesn't allow to customize the
+                # syntax highlighting scheme used for tracebacks.
+                # Fixes spyder-ide/spyder#23484
+                if sys.version_info >= (3, 9):
+                    self.set_traceback_syntax_highlighting(value)
+            elif key == "jedi_completer":
+                self.set_jedi_completer(value)
+            elif key == "greedy_completer":
+                self.set_greedy_completer(value)
+            elif key == "autocall":
+                self.set_autocall(value)
+            elif key == "matplotlib":
+                self.set_matplotlib_conf(value)
+            elif key == "update_gui":
+                self.shell.update_gui_frontend = value
+            elif key == "wurlitzer":
+                if value:
+                    self._load_wurlitzer()
+            elif key == "autoreload_magic":
+                self._autoreload_magic(value)
+        return ret
+
+    def set_color_scheme(self, color_scheme):
+        self.shell.set_spyder_theme(color_scheme)
+        self.set_sympy_forecolor(background_color=color_scheme)
+        self.set_traceback_highlighting(color_scheme)
+
+    def set_traceback_highlighting(self, color_scheme):
+        """Set the traceback highlighting color."""
+        color = 'bg:ansired' if color_scheme == 'dark' else 'bg:ansiyellow'
+        from IPython.core.ultratb import VerboseTB
+
+        if getattr(VerboseTB, 'tb_highlight', None) is not None:
+            VerboseTB.tb_highlight = color
+        elif getattr(VerboseTB, '_tb_highlight', None) is not None:
+            VerboseTB._tb_highlight = color
+
+    def set_traceback_syntax_highlighting(self, syntax_style):
+        """Set the traceback syntax highlighting style."""
+        if parse_version(ipython_release.version) >= parse_version("9.0"):
+            # Create spyder theme definition and set it (IPython 9.x+)
+            import IPython.utils.PyColorize
+            from IPython.utils.PyColorize import (
+                Theme,
+                linux_theme,
+                neutral_theme,
+            )
+
+            base = "default"
+            extra_style = neutral_theme.extra_style
+            if self.shell.get_spyder_theme() == "dark":
+                base = "monokai"
+                extra_style = linux_theme.extra_style
+
+            extra_style.update(create_pygments_dict(syntax_style))
+            theme = Theme("spyder_theme", base, extra_style)
+            IPython.utils.PyColorize.theme_table["spyder_theme"] = theme
+            self.shell.run_line_magic("colors", "spyder_theme")
+        else:
+            # Use `tb_highlight_style` class attribute to set the style (
+            # IPython 8.x)
+            import IPython.core.ultratb
+            from IPython.core.ultratb import VerboseTB
+
+            IPython.core.ultratb.get_style_by_name = create_style_class
+
+            if getattr(VerboseTB, "tb_highlight_style", None) is not None:
+                VerboseTB.tb_highlight_style = syntax_style
+            elif getattr(VerboseTB, "_tb_highlight_style", None) is not None:
+                VerboseTB._tb_highlight_style = syntax_style
 
     def get_cwd(self):
         """Get current working directory."""
@@ -631,52 +764,127 @@ class SpyderKernel(IPythonKernel):
         except:
             pass
 
-    @comm_handler
-    def is_special_kernel_valid(self):
+    def set_special_kernel(self, special):
         """
         Check if optional dependencies are available for special consoles.
         """
-        try:
-            if os.environ.get('SPY_AUTOLOAD_PYLAB_O') == 'True':
-                import matplotlib
-            elif os.environ.get('SPY_SYMPY_O') == 'True':
-                import sympy
-            elif os.environ.get('SPY_RUN_CYTHON') == 'True':
-                import cython
-        except Exception:
-            # Use Exception instead of ImportError here because modules can
-            # fail to be imported due to a lot of issues.
-            if os.environ.get('SPY_AUTOLOAD_PYLAB_O') == 'True':
-                return u'matplotlib'
-            elif os.environ.get('SPY_SYMPY_O') == 'True':
-                return u'sympy'
-            elif os.environ.get('SPY_RUN_CYTHON') == 'True':
-                return u'cython'
-        return None
+        self.shell.special = None
+        if special is None:
+            return
+
+        if special == "pylab":
+            import matplotlib  # noqa
+            exec("from pylab import *", self.shell.user_ns)
+            self.shell.special = special
+            return
+
+        if special == "sympy":
+            import sympy  # noqa
+            sympy_init = "\n".join([
+                "from sympy import *",
+                "x, y, z, t = symbols('x y z t')",
+                "k, m, n = symbols('k m n', integer=True)",
+                "f, g, h = symbols('f g h', cls=Function)",
+                "init_printing()",
+            ])
+            exec(sympy_init, self.shell.user_ns)
+            self.shell.special = special
+            return
+
+        if special == "cython":
+            import cython  # noqa
+
+            # Import pyximport to enable Cython files support for
+            # import statement
+            import pyximport
+            pyx_setup_args = {}
+
+            # Add Numpy include dir to pyximport/distutils
+            try:
+                import numpy
+                pyx_setup_args['include_dirs'] = numpy.get_include()
+            except Exception:
+                pass
+
+            # Setup pyximport and enable Cython files reload
+            pyximport.install(setup_args=pyx_setup_args,
+                              reload_support=True)
+
+            self.shell.run_line_magic("reload_ext", "Cython")
+            self.shell.special = special
+            return
+
+        raise NotImplementedError(f"{special}")
 
     @comm_handler
-    def update_syspath(self, path_dict, new_path_dict):
+    def update_syspath(self, new_path, prioritize):
         """
         Update the PYTHONPATH of the kernel.
 
-        `path_dict` and `new_path_dict` have the paths as keys and the state
-        as values. The state is `True` for active and `False` for inactive.
+        Parameters
+        ----------
+        new_path: list of str
+            List of PYTHONPATH paths.
+        prioritize: bool
+            Whether to place PYTHONPATH paths at the front (True) or
+            back (False) of sys.path.
 
-        `path_dict` corresponds to the previous state of the PYTHONPATH.
-        `new_path_dict` corresponds to the new state of the PYTHONPATH.
+        Notes
+        -----
+        A copy of sys.path is made at instantiation, which should be clean,
+        so we can just prepend/append to the copy without having to explicitly
+        remove old user paths. PYTHONPATH can just be overwritten.
         """
-        # Remove old paths
-        for path in path_dict:
-            while path in sys.path:
-                sys.path.remove(path)
+        if new_path is not None:
+            # Overwrite PYTHONPATH
+            os.environ.update({'PYTHONPATH': os.pathsep.join(new_path)})
 
-        # Add new paths
-        pypath = [path for path, active in new_path_dict.items() if active]
-        if pypath:
-            sys.path.extend(pypath)
-            os.environ.update({'PYTHONPATH': os.pathsep.join(pypath)})
+            # Add new paths to original sys.path
+            if prioritize:
+                sys.path[:] = new_path + self._sys_path
+
+                # Ensure current directory is always first to imitate Python
+                # standard behavior
+                if '' in sys.path:
+                    sys.path.remove('')
+                    sys.path.insert(0, '')
+            else:
+                sys.path[:] = self._sys_path + new_path
         else:
+            # Restore original sys.path and remove PYTHONPATH
+            sys.path[:] = self._sys_path
             os.environ.pop('PYTHONPATH', None)
+
+    @comm_handler
+    def get_pythonenv_info(self):
+        """Get the Python env info in which this kernel is installed."""
+        # We only need to compute this once
+        if not self.pythonenv_info:
+            path = sys.executable.replace("pythonw.exe", "python.exe")
+
+            if is_pixi_env(path):
+                env_type = PythonEnvType.Pixi
+            elif is_conda_env(pyexec=path):
+                env_type = PythonEnvType.Conda
+            elif is_pyenv_env(path):
+                env_type = PythonEnvType.PyEnv
+            else:
+                env_type = PythonEnvType.Custom
+
+            self.pythonenv_info = PythonEnvInfo(
+                path=path,
+                env_type=env_type,
+                name=get_env_dir(path, only_dir=True),
+                python_version=".".join(
+                    [str(n) for n in sys.version_info[:3]]
+                ),
+                # These keys are necessary to build the console banner in
+                # Spyder
+                ipython_version=ipython_release.version,
+                sys_version=sys.version,
+            )
+
+        return self.pythonenv_info
 
     # -- Private API ---------------------------------------------------
     # --- For the Variable Explorer
@@ -797,13 +1005,16 @@ class SpyderKernel(IPythonKernel):
             return
 
         generic_error = (
-            "\n" + "="*73 + "\n"
+            "\n" + "=" * 73 + "\n"
             "NOTE: The following error appeared when setting "
-            "your Matplotlib backend!!\n" + "="*73 + "\n\n"
+            "your Matplotlib backend!!\n" + "=" * 73 + "\n\n"
             "{0}"
         )
 
         magic = 'pylab' if pylab else 'matplotlib'
+
+        if backend == "auto":
+            backend = automatic_backend()
 
         error = None
         try:
@@ -818,7 +1029,7 @@ class SpyderKernel(IPythonKernel):
             # trying to set a backend. See issue 5541
             if "GUI eventloops" in str(err):
                 previous_backend = matplotlib.get_backend()
-                if not backend in previous_backend.lower():
+                if backend not in previous_backend.lower():
                     # Only inform about an error if the user selected backend
                     # and the one set by Matplotlib are different. Else this
                     # message is very confusing.
@@ -843,15 +1054,15 @@ class SpyderKernel(IPythonKernel):
             error = generic_error.format(err) + '\n\n' + additional_info
         except Exception:
             error = generic_error.format(traceback.format_exc())
-
-        self._mpl_backend_error = error
+        if error:
+            print(error)
 
     def _set_config_option(self, option, value):
         """
         Set config options using the %config magic.
 
         As parameters:
-            option: config option, for example 'InlineBackend.figure_format'.
+            option: config option, for example 'InlineBackend.figure_formats'.
             value: value of the option, for example 'SVG', 'Retina', etc.
         """
         try:
@@ -865,42 +1076,85 @@ class SpyderKernel(IPythonKernel):
         except Exception:
             pass
 
-    def _set_mpl_inline_rc_config(self, option, value):
+    def _set_inline_config_option(self, option, value):
         """
-        Update any of the Matplolib rcParams given an option and value.
+        Update InlineBackend given an option and value.
+
+        Parameters
+        ----------
+        option: str
+            Configuration option. One of 'close_figures', 'figure_formats',
+            'print_figure_kwargs', or 'rc'.
+        value: str | dict
+            Value of the option.
         """
-        try:
-            from matplotlib import rcParams
-            rcParams[option] = value
-        except Exception:
-            # Needed in case matplolib isn't installed
-            pass
+        if (
+            'InlineBackend' in self.config
+            and option in self.config['InlineBackend']
+            and isinstance(value, dict)
+        ):
+            self.config['InlineBackend'][option].update(value)
+        elif 'InlineBackend' in self.config:
+            self.config['InlineBackend'].update({option: value})
+        else:
+            self.config.update({'InlineBackend': Config({option: value})})
 
-    @comm_handler
-    def show_mpl_backend_errors(self):
-        """Show Matplotlib backend errors after the prompt is ready."""
-        if self._mpl_backend_error is not None:
-            print(self._mpl_backend_error)  # spyder: test-skip
+        value = self.config['InlineBackend'][option]
 
-    @comm_handler
-    def set_sympy_forecolor(self, background_color='dark'):
-        """Set SymPy forecolor depending on console background."""
-        if os.environ.get('SPY_SYMPY_O') == 'True':
+        if isinstance(value, LazyConfigValue):
+            value = value.to_dict().get('update') or value
+
+        self._set_config_option(f'InlineBackend.{option}', value)
+
+        if option == 'rc' and self.get_matplotlib_backend() == 'inline':
+            # Explicitly update rcParams if already in inline mode so that
+            # new settings are effective immediately.
             try:
-                from sympy import init_printing
-                if background_color == 'dark':
-                    init_printing(forecolor='White', ip=self.shell)
-                elif background_color == 'light':
-                    init_printing(forecolor='Black', ip=self.shell)
+                import matplotlib
+                matplotlib.rcParams.update(value)
             except Exception:
                 pass
 
+    def restore_rc_file_defaults(self):
+        """Restore inline rcParams to file defaults"""
+        try:
+            import matplotlib
+        except Exception:
+            return
+
+        if (
+            'InlineBackend' in self.config
+            and 'rc' in self.config['InlineBackend']
+        ):
+            # Only restore keys that may have been set explicitly by
+            # _set_inline_config_option
+            for k in self.config['InlineBackend']['rc'].keys():
+                matplotlib.rcParams[k] = matplotlib.rcParamsOrig[k]
+
+    def set_sympy_forecolor(self, background_color='dark'):
+        """Set SymPy forecolor depending on console background."""
+        if self.shell.special != "sympy":
+            return
+
+        try:
+            from sympy import init_printing
+            if background_color == 'dark':
+                init_printing(forecolor='White', ip=self.shell)
+            elif background_color == 'light':
+                init_printing(forecolor='Black', ip=self.shell)
+        except Exception:
+            pass
+
     # --- Others
-    def _load_autoreload_magic(self):
+    def _autoreload_magic(self, enable):
         """Load %autoreload magic."""
         try:
-            self.shell.run_line_magic('reload_ext', 'autoreload')
-            self.shell.run_line_magic('autoreload', '2')
+            if enable:
+                self.shell.run_line_magic('reload_ext', 'autoreload')
+                self.shell.run_line_magic('autoreload', "2")
+            else:
+                self.shell.run_line_magic('autoreload', "off")
+
         except Exception:
             pass
 

@@ -3,10 +3,116 @@
 Changes in Jupyter Qt console
 =============================
 
+.. _5.7:
+
+5.7
+~~~
+
+5.7.1
+-----
+
+`5.7.1 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.7.1>`__
+
+* Handle restarting state in connected kernels.
+* Don't clear console after setting a new syntax style.
+
+5.7.0
+-----
+
+`5.7.0 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.7.0>`__
+
+Additions
++++++++++
+
+* Zoom in/out with Ctrl + mouse wheel.
+* Add support for IPython 9 theme and colors handling.
+
+Changes
++++++++
+
+* Drop support for Python 3.8.
+
+.. _5.6:
+
+5.6
+~~~
+
+5.6.1
+-----
+
+`5.6.1 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.6.1>`__
+
+* Handle ANSI escape sequences that move the cursor.
+
+5.6.0
+-----
+
+`5.6.0 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.6.0>`__
+
+Additions
++++++++++
+
+* Use selected syntax highlighting style for tracebacks and improve ANSI color
+  codes support.
+
+Changes
++++++++
+
+* Remove syntax highlighting support for Python 2.
+* Fix handling of carriage return.
+* Fix showing bold face characters in output when using ANSI codes.
+
+.. _5.5:
+
+5.5
+~~~
+
+5.5.2
+-----
+
+`5.5.2 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.5.2>`__
+
+* Check if kernel manager is available in case the console is connected to an
+  externally launched kernel.
+* Use string representation for a QKeySequence construction to avoid an error
+  in PySide6.
+
+5.5.1
+-----
+
+`5.5.1 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.5.1>`__
+
+* Fix error when getting code completions.
+
+5.5.0
+-----
+
+`5.5.0 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.5.0>`__
+
+Changes
++++++++
+
+* Drop support for Python 3.7.
+* Remove ``ipython_genutils`` as a dependency.
+
 .. _5.4:
 
 5.4
 ~~~
+
+5.4.4
+-----
+
+`5.4.4 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.4.4>`__
+
+* Improve compatibility with PyQt6/PySide6.
+
+5.4.3
+-----
+
+`5.4.3 on GitHub <https://github.com/jupyter/qtconsole/milestones/5.4.3>`__
+
+* Add missing closed method to QtInProcessChannel.
 
 5.4.2
 -----

@@ -5,7 +5,6 @@
 # (see spyder/__init__.py for details)
 
 # Standard library imports
-import os
 from unittest.mock import Mock, MagicMock
 
 # Third party imports
@@ -61,9 +60,6 @@ class MainWindowMock(QMainWindow):
         if plugin_name in PLUGIN_REGISTRY:
             return PLUGIN_REGISTRY.get_plugin(plugin_name)
 
-    def set_prefs_size(self, size):
-        pass
-
 
 @pytest.fixture(scope="module")
 def qtbot_module(qapp, request):
@@ -90,8 +86,6 @@ def completion_plugin_all_started(request, qtbot_module,
                                   completion_plugin_all):
 
     completion_plugin = completion_plugin_all
-
-    os.environ['SPY_TEST_USE_INTROSPECTION'] = 'True'
     completion_plugin.wait_for_ms = 20000
     completion_plugin.start_all_providers()
 
@@ -114,7 +108,6 @@ def completion_plugin_all_started(request, qtbot_module,
     capabilities, _ = blocker.args
 
     def teardown():
-        os.environ['SPY_TEST_USE_INTROSPECTION'] = 'False'
         completion_plugin.stop_all_providers()
 
     request.addfinalizer(teardown)

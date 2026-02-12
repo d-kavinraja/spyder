@@ -1,16 +1,16 @@
 # Copyright 2017-2020 Palantir Technologies, Inc.
 # Copyright 2021- Python Language Server Contributors.
-# pylint: disable=import-outside-toplevel
 
 import logging
 import sys
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
-from typing import List, Mapping, Sequence, Union
+from typing import Union
 
 import pluggy
 from pluggy._hooks import HookImpl
 
-from pylsp import _utils, hookspecs, uris, PYLSP
+from pylsp import PYLSP, _utils, hookspecs, uris
 
 # See compatibility note on `group` keyword:
 #   https://docs.python.org/3/library/importlib.metadata.html#entry-points
@@ -33,18 +33,18 @@ class PluginManager(pluggy.PluginManager):
         methods: Sequence[HookImpl],
         kwargs: Mapping[str, object],
         firstresult: bool,
-    ) -> Union[object, List[object]]:
+    ) -> Union[object, list[object]]:
         # called from all hookcaller instances.
         # enable_tracing will set its own wrapping function at self._inner_hookexec
         try:
             return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             log.warning(f"Failed to load hook {hook_name}: {e}", exc_info=True)
             return []
 
 
 class Config:
-    def __init__(self, root_uri, init_opts, process_id, capabilities):
+    def __init__(self, root_uri, init_opts, process_id, capabilities) -> None:
         self._root_path = uris.to_fs_path(root_uri)
         self._root_uri = root_uri
         self._init_opts = init_opts
@@ -79,7 +79,7 @@ class Config:
         for entry_point in entry_points(group=PYLSP):
             try:
                 entry_point.load()
-            except Exception as e:  # pylint: disable=broad-except
+            except Exception as e:
                 log.info(
                     "Failed to load %s entry point '%s': %s", PYLSP, entry_point.name, e
                 )
@@ -97,6 +97,10 @@ class Config:
             self._plugin_settings = _utils.merge_dicts(
                 self._plugin_settings, plugin_conf
             )
+
+        self._plugin_settings = _utils.merge_dicts(
+            self._plugin_settings, self._init_opts.get("pylsp", {})
+        )
 
         self._update_disabled_plugins()
 
@@ -182,14 +186,14 @@ class Config:
             .get(plugin, {})
         )
 
-    def update(self, settings):
+    def update(self, settings) -> None:
         """Recursively merge the given settings into the current settings."""
         self.settings.cache_clear()
         self._settings = settings
         log.info("Updated settings to %s", self._settings)
         self._update_disabled_plugins()
 
-    def _update_disabled_plugins(self):
+    def _update_disabled_plugins(self) -> None:
         # All plugins default to enabled
         self._disabled_plugins = [
             plugin

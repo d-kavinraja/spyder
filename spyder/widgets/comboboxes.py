@@ -18,19 +18,20 @@ import os
 import os.path as osp
 
 # Third party imports
+from qtpy import PYSIDE2
 from qtpy.QtCore import QEvent, Qt, QTimer, QUrl, Signal, QSize
 from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
     QComboBox, QCompleter, QLineEdit, QSizePolicy, QToolTip)
 
 # Local imports
-from spyder.config.base import _
-from spyder.py3compat import to_text_string
+from spyder.api.translations import _
+from spyder.api.widgets.comboboxes import SpyderComboBox
 from spyder.utils.stylesheet import APP_STYLESHEET
 from spyder.widgets.helperwidgets import ClearLineEdit, IconLineEdit
 
 
-class BaseComboBox(QComboBox):
+class BaseComboBox(SpyderComboBox):
     """Editable combo box base class"""
     valid = Signal(bool, bool)
     sig_tab_pressed = Signal(bool)
@@ -47,8 +48,8 @@ class BaseComboBox(QComboBox):
         The previous size of the widget.
     """
 
-    def __init__(self, parent):
-        QComboBox.__init__(self, parent)
+    def __init__(self, parent, items_elide_mode=None):
+        super().__init__(parent, items_elide_mode)
         self.setEditable(True)
         self.setCompleter(QCompleter(self))
         self.selected_text = self.currentText()
@@ -68,7 +69,19 @@ class BaseComboBox(QComboBox):
         if (event.type() == QEvent.KeyPress) and (event.key() == Qt.Key_Tab):
             self.sig_tab_pressed.emit(True)
             return True
-        return QComboBox.event(self, event)
+        return super().event(event)
+    
+    def focusOutEvent(self, event):
+        """
+        Qt Override.
+
+        Handle focus out event to prevent changing current text with some other
+        entry in the history that could match the current text in a case
+        insensitive manner.
+        See spyder-ide/spyder#23597
+        """
+        self.add_current_text_if_valid()
+        super().focusOutEvent(event)
 
     def keyPressEvent(self, event):
         """Qt Override.
@@ -83,7 +96,7 @@ class BaseComboBox(QComboBox):
             self.set_current_text(self.selected_text)
             self.hide_completer()
         else:
-            QComboBox.keyPressEvent(self, event)
+            super().keyPressEvent(event)
 
     def resizeEvent(self, event):
         """
@@ -107,10 +120,10 @@ class BaseComboBox(QComboBox):
     def add_text(self, text):
         """Add text to combo box: add a new item if text is not found in
         combo box items."""
-        index = self.findText(text)
+        index = self.findText(text, Qt.MatchCaseSensitive)
         while index != -1:
             self.removeItem(index)
-            index = self.findText(text)
+            index = self.findText(text, Qt.MatchCaseSensitive)
         self.insertItem(0, text)
         index = self.findText('')
         if index != -1:
@@ -122,10 +135,11 @@ class BaseComboBox(QComboBox):
                 self.setCurrentIndex(0)
         else:
             self.setCurrentIndex(0)
+        self.selected_text = text
 
     def set_current_text(self, text):
         """Sets the text of the QLineEdit of the QComboBox."""
-        self.lineEdit().setText(to_text_string(text))
+        self.lineEdit().setText(str(text))
 
     def add_current_text(self):
         """Add current text to combo box history (convenient method)"""
@@ -149,12 +163,24 @@ class BaseComboBox(QComboBox):
 class PatternComboBox(BaseComboBox):
     """Search pattern combo box"""
 
-    def __init__(self, parent, items=None, tip=None,
-                 adjust_to_minimum=True, id_=None):
-        BaseComboBox.__init__(self, parent)
+    def __init__(
+        self,
+        parent,
+        items=None,
+        tip=None,
+        adjust_to_minimum=True,
+        id_=None,
+        items_elide_mode=None,
+    ):
+        if not PYSIDE2:
+            super().__init__(parent, items_elide_mode)
+        else:
+            BaseComboBox.__init__(self, parent, items_elide_mode)
 
         if adjust_to_minimum:
-            self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+            self.setSizeAdjustPolicy(
+                QComboBox.AdjustToMinimumContentsLengthWithIcon
+            )
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -177,12 +203,18 @@ class EditableComboBox(BaseComboBox):
     """
 
     def __init__(self, parent):
-        BaseComboBox.__init__(self, parent)
+        if not PYSIDE2:
+            super().__init__(parent)
+        else:
+            BaseComboBox.__init__(self, parent)
+
         self.font = QFont()
         self.selected_text = self.currentText()
 
         # Widget setup
-        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+        self.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
 
         # Signals
         self.editTextChanged.connect(self.validate)
@@ -220,7 +252,10 @@ class PathComboBox(EditableComboBox):
 
     def __init__(self, parent, adjust_to_contents=False, id_=None,
                  elide_text=False, ellipsis_place=Qt.ElideLeft):
-        EditableComboBox.__init__(self, parent)
+        if not PYSIDE2:
+            super().__init__(parent)
+        else:
+            EditableComboBox.__init__(self, parent)
 
         # Replace the default lineedit with a custom one with icon display
         # and elided text
@@ -231,7 +266,9 @@ class PathComboBox(EditableComboBox):
         if adjust_to_contents:
             self.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         else:
-            self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+            self.setSizeAdjustPolicy(
+                QComboBox.AdjustToMinimumContentsLengthWithIcon
+            )
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.tips = {True: _("Press enter to validate this path"),
                      False: ''}
@@ -251,7 +288,7 @@ class PathComboBox(EditableComboBox):
         show_status = getattr(self.lineEdit(), 'show_status_icon', None)
         if show_status:
             show_status()
-        QComboBox.focusInEvent(self, event)
+        super().focusInEvent(event)
 
     def focusOutEvent(self, event):
         """Handle focus out event restoring the last valid selected path."""
@@ -259,17 +296,26 @@ class PathComboBox(EditableComboBox):
         # https://groups.google.com/group/spyderlib/browse_thread/thread/2257abf530e210bd
         if not self.is_valid():
             lineedit = self.lineEdit()
-            QTimer.singleShot(50, lambda: lineedit.setText(self.selected_text))
+
+            # Avoid error when lineedit is no longer available (probably
+            # because this widget's parent was garbage collected).
+            # Fixes spyder-ide/spyder#23361
+            try:
+                QTimer.singleShot(
+                    50, lambda: lineedit.setText(self.selected_text)
+                )
+            except RuntimeError:
+                pass
 
         hide_status = getattr(self.lineEdit(), 'hide_status_icon', None)
         if hide_status:
             hide_status()
-        QComboBox.focusOutEvent(self, event)
+        super().focusOutEvent(event)
 
     # --- Own methods
     def _complete_options(self):
         """Find available completion options."""
-        text = to_text_string(self.currentText())
+        text = str(self.currentText())
         opts = glob.glob(text + "*")
         opts = sorted([opt for opt in opts if osp.isdir(opt)])
 
@@ -298,7 +344,7 @@ class PathComboBox(EditableComboBox):
         """Return True if string is valid"""
         if qstr is None:
             qstr = self.currentText()
-        return osp.isdir(to_text_string(qstr))
+        return osp.isdir(str(qstr))
 
     def selected(self):
         """Action to be executed when a valid item has been selected"""
@@ -330,7 +376,11 @@ class UrlComboBox(PathComboBox):
     QComboBox handling urls
     """
     def __init__(self, parent, adjust_to_contents=False, id_=None):
-        PathComboBox.__init__(self, parent, adjust_to_contents)
+        if not PYSIDE2:
+            super().__init__(parent, adjust_to_contents)
+        else:
+            PathComboBox.__init__(self, parent, adjust_to_contents)
+
         line_edit = QLineEdit(self)
         self.setLineEdit(line_edit)
         self.editTextChanged.disconnect(self.validate)
@@ -351,7 +401,10 @@ class FileComboBox(PathComboBox):
     """
     def __init__(self, parent=None, adjust_to_contents=False,
                  default_line_edit=False):
-        PathComboBox.__init__(self, parent, adjust_to_contents)
+        if not PYSIDE2:
+            super().__init__(parent, adjust_to_contents)
+        else:
+            PathComboBox.__init__(self, parent, adjust_to_contents)
 
         if default_line_edit:
             line_edit = QLineEdit(self)
@@ -368,8 +421,7 @@ class FileComboBox(PathComboBox):
         """Return True if string is valid."""
         if qstr is None:
             qstr = self.currentText()
-        valid = (osp.isfile(to_text_string(qstr)) or
-                 osp.isdir(to_text_string(qstr)))
+        valid = osp.isfile(str(qstr)) or osp.isdir(str(qstr))
         return valid
 
     def tab_complete(self):
@@ -388,7 +440,7 @@ class FileComboBox(PathComboBox):
 
     def _complete_options(self):
         """Find available completion options."""
-        text = to_text_string(self.currentText())
+        text = str(self.currentText())
         opts = glob.glob(text + "*")
         opts = sorted([opt for opt in opts
                        if osp.isdir(opt) or osp.isfile(opt)])
@@ -414,7 +466,11 @@ class PythonModulesComboBox(PathComboBox):
     (i.e. .py, .pyw files *and* directories containing __init__.py)
     """
     def __init__(self, parent, adjust_to_contents=False, id_=None):
-        PathComboBox.__init__(self, parent, adjust_to_contents)
+        if not PYSIDE2:
+            super().__init__(parent, adjust_to_contents)
+        else:
+            PathComboBox.__init__(self, parent, adjust_to_contents)
+
         if id_ is not None:
             self.ID = id_
 
@@ -422,7 +478,7 @@ class PythonModulesComboBox(PathComboBox):
         """Return True if string is valid"""
         if qstr is None:
             qstr = self.currentText()
-        return is_module_or_package(to_text_string(qstr))
+        return is_module_or_package(str(qstr))
 
     def selected(self):
         """Action to be executed when a valid item has been selected"""
